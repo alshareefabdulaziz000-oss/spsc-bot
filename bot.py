@@ -1,4 +1,14 @@
 import os
+import subprocess
+
+# تحميل Chromium عند بدء التشغيل
+try:
+    print("Installing Chromium...")
+    subprocess.run(["playwright", "install", "chromium"], check=True)
+    print("Chromium installed successfully")
+except Exception as e:
+    print(f"Playwright install error: {e}")
+
 import re
 import logging
 import tempfile
@@ -94,55 +104,46 @@ async def fill_form_playwright(mrn: str, date: str, case: dict) -> bool:
             await page.goto(FORM_URL, wait_until="networkidle", timeout=60000)
             await asyncio.sleep(2)
 
-            # Did error reach patient → No
             try:
                 await page.click("input[type='radio'][value='No']", timeout=5000)
             except:
                 pass
 
-            # MRN
             try:
                 await page.fill("input[id*='MRN'], input[name*='MRN']", mrn, timeout=5000)
             except:
                 pass
 
-            # Event Date
             try:
                 await page.fill("input[id*='EventDate'], input[name*='EventDate']", date, timeout=5000)
             except:
                 pass
 
-            # Prescription type → Others
             try:
                 await page.click("input[type='radio'][value*='Other']", timeout=5000)
             except:
                 pass
 
-            # Prescription other text
             try:
                 await page.fill("input[id*='Other'], textarea[id*='Other']", case["prescription_text"], timeout=5000)
             except:
                 pass
 
-            # Description
             try:
                 await page.fill("textarea[id*='Description']", case["description"], timeout=5000)
             except:
                 pass
 
-            # Reporter name
             try:
                 await page.fill("input[id*='Reporter'], input[id*='reporter']", FIXED_DATA["reporter"], timeout=5000)
             except:
                 pass
 
-            # Email
             try:
                 await page.fill("input[type='email'], input[id*='Email']", FIXED_DATA["email"], timeout=5000)
             except:
                 pass
 
-            # Mobile
             try:
                 await page.fill("input[id*='Mobile'], input[id*='mobile']", FIXED_DATA["mobile"], timeout=5000)
             except:
@@ -150,7 +151,6 @@ async def fill_form_playwright(mrn: str, date: str, case: dict) -> bool:
 
             await asyncio.sleep(2)
 
-            # Submit
             try:
                 await page.click("input[type='submit'], button[type='submit']", timeout=5000)
                 await asyncio.sleep(3)
