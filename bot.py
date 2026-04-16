@@ -38,7 +38,7 @@ FIXED = {
 }
 
 async def extract_from_image(image_path: str) -> dict:
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    model = genai.GenerativeModel("gemini-flash-latest")
     with open(image_path, "rb") as f:
         image_data = f.read()
 
