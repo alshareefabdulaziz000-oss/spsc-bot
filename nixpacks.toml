@@ -1,14 +1,13 @@
 [phases.setup]
-nixPkgs = ["python311", "gcc", "g++", "make"]
+nixPkgs = ["python311"]
 
 [phases.build]
 cmds = [
-  "pip install --upgrade pip",
-  "pip install greenlet==3.1.1 --no-build-isolation",
-  "pip install -r requirements.txt",
-  "playwright install chromium",
-  "playwright install-deps chromium"
+  "python3.11 -m pip install --upgrade pip",
+  "python3.11 -m pip install -r requirements.txt",
+  "python3.11 -m playwright install chromium",
+  "python3.11 -m playwright install-deps chromium"
 ]
 
 [start]
-cmd = "python bot.py"
+cmd = "python3.11 bot.py"
