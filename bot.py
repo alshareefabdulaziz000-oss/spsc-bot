@@ -12,8 +12,17 @@ import re
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+import re
+
+_raw_token = os.environ.get("TELEGRAM_TOKEN", "")
+_raw_key = os.environ.get("GEMINI_API_KEY", "")
+
+TELEGRAM_TOKEN = re.sub(r'\s+', '', _raw_token)
+GEMINI_API_KEY = re.sub(r'\s+', '', _raw_key)
+
+print(f"Token length: {len(TELEGRAM_TOKEN)}")
+print(f"Key length: {len(GEMINI_API_KEY)}")
+
 
 genai.configure(api_key=GEMINI_API_KEY)
 
