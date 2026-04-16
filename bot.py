@@ -2,11 +2,11 @@ import os
 import re
 import logging
 import tempfile
-import requests
-from bs4 import BeautifulSoup
+import asyncio
 import google.generativeai as genai
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from playwright.async_api import async_playwright
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -23,6 +23,12 @@ print(f"Key length: {len(GEMINI_API_KEY)}")
 genai.configure(api_key=GEMINI_API_KEY)
 
 FORM_URL = "https://portal.spsc.gov.sa/MEH/Default.aspx?Id=454"
+
+FIXED_DATA = {
+    "reporter": "Az",
+    "email": "aalhazmi50@moh.gov.sa",
+    "mobile": "0547995498",
+}
 
 
 def extract_from_image(image_path: str) -> dict:
@@ -50,61 +56,120 @@ DATE: DD/MM/YYYY"""
     return {"mrn": mrn, "date": date}
 
 
-def fill_form(mrn: str, date: str, keyword: str, prescription_text: str) -> bool:
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    })
-
-    response = session.get(FORM_URL)
-    soup = BeautifulSoup(response.text, "html.parser")
-
-    form_data = {}
-    for inp in soup.find_all("input"):
-        name = inp.get("name", "")
-        value = inp.get("value", "")
-        if name:
-            form_data[name] = value
-
-    if keyword.lower() == "omeprazole":
-        description = "Doctor write medicine out of privilege"
-        medication = "omeprazole"
-    elif keyword.lower() == "3 days":
-        description = "Doctor wrote medicine more than 3 days"
-        medication = ""
-    elif keyword.lower() == "no diagnosis":
-        description = "Didn't write the diagnosis"
-        medication = ""
+def get_case_details(keyword: str) -> dict:
+    k = keyword.lower().strip()
+    if k == "omeprazole":
+        return {
+            "medication": "omeprazole",
+            "description": "Doctor write medicine out of privilege",
+            "prescription_text": keyword,
+        }
+    elif k == "3 days":
+        return {
+            "medication": "",
+            "description": "Doctor wrote medicine more than 3 days",
+            "prescription_text": keyword,
+        }
+    elif k == "no diagnosis":
+        return {
+            "medication": "",
+            "description": "Didn't write the diagnosis",
+            "prescription_text": keyword,
+        }
     else:
-        description = keyword
-        medication = keyword
+        return {
+            "medication": keyword,
+            "description": keyword,
+            "prescription_text": keyword,
+        }
 
-    form_data.update({
-        "ctl00$ContentPlaceHolder1$rdlReachPatient": "No",
-        "ctl00$ContentPlaceHolder1$txtEventDate": date,
-        "ctl00$ContentPlaceHolder1$rdlPrescriptionType": "Others",
-        "ctl00$ContentPlaceHolder1$txtPrescriptionOther": prescription_text,
-        "ctl00$ContentPlaceHolder1$txtMRN": mrn,
-        "ctl00$ContentPlaceHolder1$txtDescription": description,
-        "ctl00$ContentPlaceHolder1$txtReporterName": "Az",
-        "ctl00$ContentPlaceHolder1$txtEmail": "aalhazmi50@moh.gov.sa",
-        "ctl00$ContentPlaceHolder1$txtMobile": "0547995498",
-        "ctl00$ContentPlaceHolder1$ddlStaffCategory": "Pharmacist",
-        "ctl00$ContentPlaceHolder1$ddlFactors": "Lack of knowledge, experience",
-        "ctl00$ContentPlaceHolder1$btnSubmit": "Submit",
-    })
 
-    if medication:
-        form_data["ctl00$ContentPlaceHolder1$ddlMedication"] = medication
+async def fill_form_playwright(mrn: str, date: str, case: dict) -> bool:
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+        context = await browser.new_context()
+        page = await context.new_page()
 
-    submit = session.post(FORM_URL, data=form_data)
-    return submit.status_code == 200
+        try:
+            await page.goto(FORM_URL, wait_until="networkidle", timeout=60000)
+            await asyncio.sleep(2)
+
+            # Did error reach patient → No
+            try:
+                await page.click("input[type='radio'][value='No']", timeout=5000)
+            except:
+                pass
+
+            # MRN
+            try:
+                await page.fill("input[id*='MRN'], input[name*='MRN']", mrn, timeout=5000)
+            except:
+                pass
+
+            # Event Date
+            try:
+                await page.fill("input[id*='EventDate'], input[name*='EventDate']", date, timeout=5000)
+            except:
+                pass
+
+            # Prescription type → Others
+            try:
+                await page.click("input[type='radio'][value*='Other']", timeout=5000)
+            except:
+                pass
+
+            # Prescription other text
+            try:
+                await page.fill("input[id*='Other'], textarea[id*='Other']", case["prescription_text"], timeout=5000)
+            except:
+                pass
+
+            # Description
+            try:
+                await page.fill("textarea[id*='Description']", case["description"], timeout=5000)
+            except:
+                pass
+
+            # Reporter name
+            try:
+                await page.fill("input[id*='Reporter'], input[id*='reporter']", FIXED_DATA["reporter"], timeout=5000)
+            except:
+                pass
+
+            # Email
+            try:
+                await page.fill("input[type='email'], input[id*='Email']", FIXED_DATA["email"], timeout=5000)
+            except:
+                pass
+
+            # Mobile
+            try:
+                await page.fill("input[id*='Mobile'], input[id*='mobile']", FIXED_DATA["mobile"], timeout=5000)
+            except:
+                pass
+
+            await asyncio.sleep(2)
+
+            # Submit
+            try:
+                await page.click("input[type='submit'], button[type='submit']", timeout=5000)
+                await asyncio.sleep(3)
+            except:
+                pass
+
+            await browser.close()
+            return True
+
+        except Exception as e:
+            logger.error(f"Playwright error: {e}")
+            await browser.close()
+            return False
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message.photo and not message.document:
-        await message.reply_text("أرسل صورة الوصفة مع الكلمة المفتاحية")
+        await message.reply_text("أرسل صورة الوصفة مع الكلمة المفتاحية في caption")
         return
     keyword = message.caption or ""
     if not keyword:
@@ -131,12 +196,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text(f"⚠️ ما قدرت أقرأ البيانات\nMRN: {mrn}\nDate: {date}")
             return
 
-        success = fill_form(mrn, date, keyword.strip(), keyword.strip())
+        case = get_case_details(keyword)
+
+        success = await fill_form_playwright(mrn, date, case)
 
         if success:
-            await message.reply_text(f"Done ✔️\n\nMRN: {mrn}\nDate: {date}\nKeyword: {keyword}")
+            await message.reply_text(
+                f"Done ✔️\n\n"
+                f"MRN: {mrn}\n"
+                f"Date: {date}\n"
+                f"Keyword: {keyword}\n"
+                f"Description: {case['description']}"
+            )
         else:
-            await message.reply_text("⚠️ تم الإرسال لكن تحقق من النموذج يدوياً")
+            await message.reply_text("⚠️ فشل الإرسال، تحقق من اللوجز")
 
     except Exception as e:
         logger.error(f"Error: {e}")
