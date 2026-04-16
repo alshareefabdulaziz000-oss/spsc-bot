@@ -52,8 +52,7 @@ async def extract_from_image(image_path: str) -> dict:
     DATE: DD/MM/YYYY
     """
 
-    import google.generativeai as genai
-    from google.generativeai.types import HarmCategory, HarmBlockThreshold
+    
 
     response = model.generate_content([
         prompt,
