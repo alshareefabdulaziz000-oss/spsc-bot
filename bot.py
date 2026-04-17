@@ -98,6 +98,57 @@ async def fill_text(page, field_id: str, value: str, name: str) -> bool:
     return False
 
 
+async def fill_text_by_name(page, field_name: str, value: str, name: str) -> bool:
+    """يملأ حقل باستخدام اسم (name attribute) بدل id"""
+    for attempt in range(3):
+        try:
+            # نبحث بأي طريقة: id, name, أو partial match
+            filled = await page.evaluate(f"""
+                () => {{
+                    // محاولة 1: id مباشر
+                    let el = document.getElementById('{field_name}');
+                    if (!el) el = document.getElementById('ContentPlaceHolder1_{field_name}');
+                    if (!el) el = document.getElementById('ContentPlaceHolder1_{field_name.capitalize()}');
+                    if (!el) el = document.getElementById('ContentPlaceHolder1_{field_name}_Txt');
+                    
+                    // محاولة 2: name attribute
+                    if (!el) el = document.querySelector(`[name="{field_name}"]`);
+                    if (!el) el = document.querySelector(`[name*="{field_name}" i]`);
+                    
+                    // محاولة 3: id يحتوي على النص
+                    if (!el) {{
+                        const all = document.querySelectorAll('input[type="text"], textarea');
+                        for (const i of all) {{
+                            if ((i.id || '').toLowerCase().includes('{field_name.lower()}') ||
+                                (i.name || '').toLowerCase().includes('{field_name.lower()}')) {{
+                                el = i;
+                                break;
+                            }}
+                        }}
+                    }}
+                    
+                    if (el) {{
+                        el.value = '{value}';
+                        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        el.dispatchEvent(new Event('blur', {{ bubbles: true }}));
+                        return el.id || el.name || 'found';
+                    }}
+                    return null;
+                }}
+            """)
+            
+            if filled:
+                logger.info(f"✅ {name}: filled via '{filled}'")
+                return True
+            await asyncio.sleep(1)
+        except Exception as e:
+            logger.error(f"Attempt {attempt+1} {name}: {e}")
+            await asyncio.sleep(1)
+    logger.error(f"❌ {name} FAILED")
+    return False
+
+
 async def select_option_by_label(page, field_id: str, label_text: str, name: str) -> bool:
     for attempt in range(3):
         try:
@@ -220,8 +271,8 @@ async def fill_form(data: dict) -> dict:
             
             status = {}
             
-            # 1. Reach Patient → No
-            status["reach_no"] = await click_radio_hard(page, "ContentPlaceHolder1_ErrorReachPatient_0", "Reach No")
+            # 1. Reach Patient → No (الـ _1 هو No)
+            status["reach_no"] = await click_radio_hard(page, "ContentPlaceHolder1_ErrorReachPatient_1", "Reach No")
             await asyncio.sleep(0.5)
             
             # 2. Event Date
@@ -280,9 +331,13 @@ async def fill_form(data: dict) -> dict:
                 logger.error(f"Date: {e}")
             status["date"] = date_success
             
-            # 3. Prescription Other/s
+            # 3. Prescription Other/s + نكتب ER في الحقل الجانبي
             status["prescription"] = await click_radio_hard(page, "ContentPlaceHolder1_Wasfaty_Chk_0", "Prescription Other/s")
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
+            
+            # نكتب ER في حقل other
+            status["other_er"] = await fill_text_by_name(page, "other", "ER", "Other ER")
+            await asyncio.sleep(0.5)
             
             # 4. Stage
             status["stage"] = await select_option_by_label(page, "ContentPlaceHolder1_ME_Type_Drop", "Prescribing", "Stage")
@@ -411,7 +466,7 @@ async def fill_form(data: dict) -> dict:
                 except Exception as e:
                     logger.error(f"Submit: {e}")
                 
-                # Yes button — JavaScript مباشرة
+                # Yes button — JS
                 logger.info("👆 Clicking Yes via JS...")
                 yes_clicked = await page.evaluate("""
                     () => {
