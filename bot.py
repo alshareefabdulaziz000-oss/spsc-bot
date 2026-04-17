@@ -10,6 +10,7 @@ import re
 import logging
 import tempfile
 import asyncio
+import base64
 import google.generativeai as genai
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
@@ -27,16 +28,18 @@ FORM_URL = "https://portal.spsc.gov.sa/MEH/Default.aspx?Id=454"
 
 
 def extract_from_image(image_path: str) -> dict:
+    """استخراج البيانات من صورة الوصفة"""
     model = genai.GenerativeModel("gemini-flash-latest")
     with open(image_path, "rb") as f:
         image_data = f.read()
-    prompt = """من صورة الوصفة الطبية، استخرج:
-1. MRN
-2. DATE (DD/MM/YYYY)
-3. GENDER (Male أو Female)
-4. DIAGNOSIS (من Indication، EMPTY إذا فاضي)
+    
+    prompt = """انت مساعد دقيق جداً. من صورة الوصفة الطبية استخرج:
+1. MRN: رقم المريض (Medical Record Number)
+2. DATE: تاريخ الوصفة (DD/MM/YYYY)
+3. GENDER: جنس المريض (Male أو Female)
+4. DIAGNOSIS: التشخيص من قسم Indication (اكتب EMPTY إذا فاضي)
 
-أجب:
+أجب بهذا الشكل فقط:
 MRN: xxxxx
 DATE: DD/MM/YYYY
 GENDER: Male
@@ -68,18 +71,97 @@ def get_case_details(keyword: str) -> dict:
         return {"description": keyword, "medication_search": keyword, "type_of_error": "1"}
 
 
-async def safe_action(name, coro):
+async def verify_field_with_gemini(page, field_id: str, expected_value: str, field_name: str) -> bool:
+    """يستخدم JavaScript للتحقق من قيمة الحقل"""
     try:
-        await coro
-        logger.info(f"✅ {name}")
-        return True
+        actual = await page.evaluate(f"""() => document.getElementById('{field_id}')?.value || ''""")
+        if str(expected_value).lower() in str(actual).lower() or str(actual).strip() != '':
+            logger.info(f"✅ VERIFIED {field_name}: '{actual}'")
+            return True
+        else:
+            logger.warning(f"⚠️ FAILED {field_name}: expected '{expected_value}', got '{actual}'")
+            return False
     except Exception as e:
-        logger.error(f"❌ {name}: {e}")
+        logger.error(f"❌ Verify error {field_name}: {e}")
         return False
 
 
+async def fill_field_robust(page, field_id: str, value: str, field_name: str, max_retries: int = 3):
+    """يملأ حقل مع إعادة المحاولة والتحقق"""
+    for attempt in range(max_retries):
+        try:
+            # التأكد من وجود الحقل
+            await page.wait_for_selector(f"#{field_id}", state="attached", timeout=10000)
+            
+            # النقر والملء
+            await page.click(f"#{field_id}", timeout=5000)
+            await asyncio.sleep(0.3)
+            await page.fill(f"#{field_id}", "", timeout=5000)  # نمسح أولاً
+            await page.fill(f"#{field_id}", str(value), timeout=5000)
+            await asyncio.sleep(0.5)
+            
+            # إطلاق event change
+            await page.evaluate(f"""
+                () => {{
+                    const el = document.getElementById('{field_id}');
+                    if (el) {{
+                        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        el.dispatchEvent(new Event('blur', {{ bubbles: true }}));
+                    }}
+                }}
+            """)
+            await asyncio.sleep(0.3)
+            
+            # التحقق
+            if await verify_field_with_gemini(page, field_id, value, field_name):
+                return True
+            
+            logger.warning(f"Retry {attempt + 1} for {field_name}")
+            await asyncio.sleep(1)
+        except Exception as e:
+            logger.error(f"Attempt {attempt + 1} failed for {field_name}: {e}")
+            await asyncio.sleep(1)
+    
+    return False
+
+
+async def select_dropdown_robust(page, field_id: str, value: str, field_name: str, max_retries: int = 3):
+    """يختار من dropdown مع تحقق"""
+    for attempt in range(max_retries):
+        try:
+            await page.wait_for_selector(f"#{field_id}", state="attached", timeout=10000)
+            await page.select_option(f"#{field_id}", value=str(value), timeout=5000)
+            await asyncio.sleep(0.5)
+            
+            # إطلاق change event
+            await page.evaluate(f"""
+                () => {{
+                    const el = document.getElementById('{field_id}');
+                    if (el) {{
+                        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    }}
+                }}
+            """)
+            await asyncio.sleep(0.3)
+            
+            # التحقق
+            actual = await page.evaluate(f"""() => document.getElementById('{field_id}')?.value || ''""")
+            if actual == str(value):
+                logger.info(f"✅ VERIFIED dropdown {field_name}: '{actual}'")
+                return True
+            
+            logger.warning(f"Retry {attempt + 1} for dropdown {field_name}")
+            await asyncio.sleep(1)
+        except Exception as e:
+            logger.error(f"Attempt {attempt + 1} failed for {field_name}: {e}")
+            await asyncio.sleep(1)
+    
+    return False
+
+
 async def fill_form(data: dict) -> dict:
-    result = {"success": False, "error": "", "screenshot_path": "", "screenshot_after": ""}
+    result = {"success": False, "error": "", "screenshot_path": "", "screenshot_after": "", "field_status": {}}
     
     try:
         subprocess.run(["playwright", "install", "chromium"], check=True, capture_output=True)
@@ -93,113 +175,149 @@ async def fill_form(data: dict) -> dict:
         page.on("dialog", lambda dialog: asyncio.create_task(dialog.accept()))
         
         try:
-            logger.info("Opening form...")
+            logger.info("🌐 Opening form...")
             await page.goto(FORM_URL, wait_until="networkidle", timeout=90000)
-            await asyncio.sleep(3)
+            await asyncio.sleep(5)  # انتظار إضافي للتحميل الكامل
             
-            # 1. Error Reach Patient → No
-            await safe_action("Reach Patient No", page.click("#ContentPlaceHolder1_ErrorReachPatient_0"))
-            await asyncio.sleep(0.5)
+            status = {}
             
-            # 2. Event Date - الحل الكامل
-            # بنحاول نستخدم الـ datetimepicker API لأن الحقل datetimepicker من bootstrap
-            date_parts = data['date'].split('/')  # DD/MM/YYYY
-            if len(date_parts) == 3:
-                dd, mm, yyyy = date_parts
-                # صيغة moment.js: YYYY-MM-DD HH:mm
-                iso_date = f"{yyyy}-{mm.zfill(2)}-{dd.zfill(2)} 10:00"
-            else:
-                iso_date = f"2026-04-15 10:00"
+            # ========== المرحلة 1: الحقول التي تسبب postback ==========
             
-            date_js = f"""
-                () => {{
-                    const visible = document.getElementById('ContentPlaceHolder1_Event_Date_Txt');
-                    const hidden = document.getElementById('ContentPlaceHolder1_hdnEvent_Dt_Txt');
-                    
-                    // محاولة 1: استخدام jQuery datetimepicker API
-                    try {{
-                        if (typeof $ !== 'undefined' && $(visible).data('DateTimePicker')) {{
-                            $(visible).data('DateTimePicker').date(moment('{iso_date}'));
-                        }}
-                    }} catch(e) {{ console.log(e); }}
-                    
-                    // محاولة 2: إزالة readonly والكتابة المباشرة
-                    if (visible) {{
-                        visible.removeAttribute('readonly');
-                        visible.value = '{data['date']} 10:00 AM';
-                        visible.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                        visible.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                        visible.dispatchEvent(new Event('blur', {{ bubbles: true }}));
-                    }}
-                    
-                    // محاولة 3: ملء الحقل المخفي بصيغ مختلفة
-                    if (hidden) {{
-                        hidden.value = '{data['date']} 10:00 AM';
-                        hidden.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    }}
-                    
-                    return {{visible: visible?.value, hidden: hidden?.value}};
-                }}
-            """
-            date_result = await page.evaluate(date_js)
-            logger.info(f"Date set: {date_result}")
-            await asyncio.sleep(1)
-            
-            # 3. Prescription type → Other/s
-            await safe_action("Prescription Other/s", page.click("#ContentPlaceHolder1_Wasfaty_Chk_0"))
-            await asyncio.sleep(0.5)
-            
-            # 4. MRN
-            await safe_action("MRN", page.fill("#ContentPlaceHolder1_Mr_Txt", data['mrn']))
-            await asyncio.sleep(0.5)
-            
-            # 5. Gender
-            gender_value = "1" if data['gender'].lower() == "male" else "2"
-            await safe_action("Gender", page.select_option("#ContentPlaceHolder1_Gender_Drop", value=gender_value))
-            await asyncio.sleep(0.5)
-            
-            # 6. Where It Happens → ER Adult
-            await safe_action("Where ER Adult", page.select_option("#ContentPlaceHolder1_WhereItHappen_Drop", value="3"))
-            await asyncio.sleep(0.5)
-            
-            # 7. Diagnosis
+            # 1. Reach Patient → No
             try:
-                diagnosis_input = page.locator("#ContentPlaceHolder1_txtDiagnosis")
-                await diagnosis_input.click()
+                await page.click("#ContentPlaceHolder1_ErrorReachPatient_0", timeout=10000)
+                await asyncio.sleep(0.5)
+                checked = await page.evaluate("() => document.getElementById('ContentPlaceHolder1_ErrorReachPatient_0')?.checked")
+                status["reach_no"] = checked
+                logger.info(f"✅ Reach No: {checked}")
+            except Exception as e:
+                logger.error(f"❌ Reach: {e}")
+                status["reach_no"] = False
+            
+            # 2. Event Date - جرب عدة طرق
+            logger.info("📅 Setting Event Date with multiple methods...")
+            date_success = False
+            
+            # طريقة 1: jQuery datetimepicker
+            try:
+                date_parts = data['date'].split('/')
+                if len(date_parts) == 3:
+                    dd, mm, yyyy = date_parts
+                    iso_date = f"{yyyy}-{mm.zfill(2)}-{dd.zfill(2)} 10:00"
+                else:
+                    iso_date = "2026-04-15 10:00"
+                
+                await page.evaluate(f"""
+                    () => {{
+                        if (typeof $ !== 'undefined' && $('#ContentPlaceHolder1_Event_Date_Txt').data('DateTimePicker')) {{
+                            $('#ContentPlaceHolder1_Event_Date_Txt').data('DateTimePicker').date(moment('{iso_date}'));
+                        }}
+                    }}
+                """)
+                await asyncio.sleep(1)
+                val = await page.evaluate("() => document.getElementById('ContentPlaceHolder1_Event_Date_Txt')?.value")
+                if val and val.strip():
+                    date_success = True
+                    logger.info(f"✅ Date (method 1): {val}")
+            except Exception as e:
+                logger.warning(f"Method 1 failed: {e}")
+            
+            # طريقة 2: إزالة readonly والكتابة مباشرة
+            if not date_success:
+                try:
+                    await page.evaluate(f"""
+                        () => {{
+                            const el = document.getElementById('ContentPlaceHolder1_Event_Date_Txt');
+                            if (el) {{
+                                el.removeAttribute('readonly');
+                                el.value = '{data['date']} 10:00 AM';
+                                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                            }}
+                        }}
+                    """)
+                    await asyncio.sleep(0.5)
+                    val = await page.evaluate("() => document.getElementById('ContentPlaceHolder1_Event_Date_Txt')?.value")
+                    if val and val.strip():
+                        date_success = True
+                        logger.info(f"✅ Date (method 2): {val}")
+                except Exception as e:
+                    logger.warning(f"Method 2 failed: {e}")
+            
+            # طريقة 3: فتح الـ picker والضغط على Today
+            if not date_success:
+                try:
+                    await page.click(".input-group-addon, span.glyphicon-calendar", timeout=3000)
+                    await asyncio.sleep(1)
+                    await page.click("text=Today", timeout=3000)
+                    await asyncio.sleep(1)
+                    try:
+                        await page.click("text=12:00", timeout=2000)
+                    except:
+                        pass
+                    await asyncio.sleep(1)
+                    val = await page.evaluate("() => document.getElementById('ContentPlaceHolder1_Event_Date_Txt')?.value")
+                    if val and val.strip():
+                        date_success = True
+                        logger.info(f"✅ Date (method 3): {val}")
+                except Exception as e:
+                    logger.warning(f"Method 3 failed: {e}")
+            
+            status["date"] = date_success
+            
+            # 3. Prescription Other/s
+            try:
+                await page.click("#ContentPlaceHolder1_Wasfaty_Chk_0", timeout=5000)
+                await asyncio.sleep(0.5)
+                status["prescription"] = True
+                logger.info("✅ Prescription Other/s")
+            except Exception as e:
+                logger.error(f"❌ Prescription: {e}")
+                status["prescription"] = False
+            
+            # 4. Stage → Prescribing (قبل postback الأزرار)
+            status["stage"] = await select_dropdown_robust(page, "ContentPlaceHolder1_ME_Type_Drop", "1", "Stage")
+            
+            # 5. Type of Error + Add (postback!)
+            status["type_select"] = await select_dropdown_robust(page, "ContentPlaceHolder1_ddlNewTypeOfError", data['type_of_error'], "Type of Error")
+            try:
+                await page.click("#ContentPlaceHolder1_NewTypeOfError_Main_Btn", timeout=5000)
+                await asyncio.sleep(3)  # انتظار postback
+                status["type_add"] = True
+                logger.info("✅ Type Add (postback)")
+            except Exception as e:
+                logger.error(f"❌ Type Add: {e}")
+                status["type_add"] = False
+            
+            # 6. Description
+            status["description"] = await fill_field_robust(page, "ContentPlaceHolder1_Event_Desc_Txt", data['description'], "Description")
+            
+            # 7. Diagnosis (autocomplete)
+            try:
+                await page.click("#ContentPlaceHolder1_txtDiagnosis", timeout=5000)
+                await asyncio.sleep(0.5)
                 search_term = data['diagnosis'][:5] if len(data['diagnosis']) >= 3 else "headache"
-                await diagnosis_input.type(search_term, delay=100)
+                await page.type("#ContentPlaceHolder1_txtDiagnosis", search_term, delay=100)
                 await asyncio.sleep(3)
                 await page.keyboard.press("ArrowDown")
                 await asyncio.sleep(0.5)
                 await page.keyboard.press("Enter")
                 await asyncio.sleep(1)
-                logger.info("✅ Diagnosis")
+                val = await page.evaluate("() => document.getElementById('ContentPlaceHolder1_txtDiagnosis')?.value")
+                status["diagnosis"] = bool(val and val.strip())
+                logger.info(f"✅ Diagnosis: {val}")
             except Exception as e:
                 logger.error(f"❌ Diagnosis: {e}")
+                status["diagnosis"] = False
             
-            # 8. Stage → Prescribing
-            await safe_action("Stage Prescribing", page.select_option("#ContentPlaceHolder1_ME_Type_Drop", value="1"))
-            await asyncio.sleep(0.5)
+            # 8. Action Taken
+            status["action"] = await select_dropdown_robust(page, "ContentPlaceHolder1_ActionTaken_Drop", "3", "Action Taken")
             
-            # 9. Type of Error + Add
-            await safe_action("Type Error select", page.select_option("#ContentPlaceHolder1_ddlNewTypeOfError", value=data['type_of_error']))
-            await asyncio.sleep(0.5)
-            await safe_action("Type Error Add", page.click("#ContentPlaceHolder1_NewTypeOfError_Main_Btn"))
-            await asyncio.sleep(2)
-            
-            # 10. Description
-            await safe_action("Description", page.fill("#ContentPlaceHolder1_Event_Desc_Txt", data['description']))
-            await asyncio.sleep(0.5)
-            
-            # 11. Action Taken
-            await safe_action("Action Taken", page.select_option("#ContentPlaceHolder1_ActionTaken_Drop", value="3"))
-            await asyncio.sleep(0.5)
-            
-            # 12. Medication
+            # 9. Medication + Add (postback!)
             try:
                 med_value = await page.evaluate(f"""
                     () => {{
                         const sel = document.getElementById('ContentPlaceHolder1_Generic_Name_Drop');
+                        if (!sel) return null;
                         const term = '{data['medication_search']}'.toLowerCase();
                         for (let i = 0; i < sel.options.length; i++) {{
                             if (sel.options[i].text.toLowerCase().includes(term)) {{
@@ -212,97 +330,122 @@ async def fill_form(data: dict) -> dict:
                 if med_value:
                     await page.select_option("#ContentPlaceHolder1_Generic_Name_Drop", value=med_value)
                     await asyncio.sleep(0.5)
-                    await page.click("#ContentPlaceHolder1_Add_Med")
-                    await asyncio.sleep(2)
-                    logger.info(f"✅ Medication added")
+                    await page.click("#ContentPlaceHolder1_Add_Med", timeout=5000)
+                    await asyncio.sleep(3)  # انتظار postback
+                    status["medication"] = True
+                    logger.info(f"✅ Medication Add (postback)")
+                else:
+                    status["medication"] = False
             except Exception as e:
                 logger.error(f"❌ Medication: {e}")
+                status["medication"] = False
             
-            # 13. Factors
-            await safe_action("Factor select", page.select_option("#ContentPlaceHolder1_Factors_Drop", value="4"))
-            await asyncio.sleep(0.5)
-            await safe_action("Factor Add", page.click("#ContentPlaceHolder1_Factors_Main_Btn"))
-            await asyncio.sleep(2)
+            # 10. Factor + Add (postback!)
+            try:
+                await page.select_option("#ContentPlaceHolder1_Factors_Drop", value="4", timeout=5000)
+                await asyncio.sleep(0.5)
+                await page.click("#ContentPlaceHolder1_Factors_Main_Btn", timeout=5000)
+                await asyncio.sleep(3)  # انتظار postback
+                status["factor"] = True
+                logger.info("✅ Factor Add (postback)")
+            except Exception as e:
+                logger.error(f"❌ Factor: {e}")
+                status["factor"] = False
+            
+            # ========== المرحلة 2: الحقول العادية بعد كل postbacks ==========
+            logger.info("🔄 Filling simple fields after all postbacks...")
+            
+            # 11. MRN (بعد postbacks)
+            status["mrn"] = await fill_field_robust(page, "ContentPlaceHolder1_Mr_Txt", data['mrn'], "MRN")
+            
+            # 12. Gender
+            gender_value = "1" if data['gender'].lower() == "male" else "2"
+            status["gender"] = await select_dropdown_robust(page, "ContentPlaceHolder1_Gender_Drop", gender_value, "Gender")
+            
+            # 13. Where It Happens
+            status["where"] = await select_dropdown_robust(page, "ContentPlaceHolder1_WhereItHappen_Drop", "3", "Where It Happens")
             
             # 14. Reporter Name
-            await safe_action("Reporter Name", page.fill("#ContentPlaceHolder1_Reporter_Name_Txt", "Az"))
-            await asyncio.sleep(0.5)
+            status["reporter"] = await fill_field_robust(page, "ContentPlaceHolder1_Reporter_Name_Txt", "Az", "Reporter Name")
             
             # 15. Email
-            await safe_action("Email", page.fill("#ContentPlaceHolder1_Reporter_Email_Txt", "aalhazmi50@moh.gov.sa"))
-            await asyncio.sleep(0.5)
+            status["email"] = await fill_field_robust(page, "ContentPlaceHolder1_Reporter_Email_Txt", "aalhazmi50@moh.gov.sa", "Email")
             
             # 16. Mobile
-            await safe_action("Mobile", page.fill("#ContentPlaceHolder1_Reporter_Mobile_Txt", "0547995498"))
-            await asyncio.sleep(0.5)
+            status["mobile"] = await fill_field_robust(page, "ContentPlaceHolder1_Reporter_Mobile_Txt", "0547995498", "Mobile")
             
-            # 17. Staff Category → Pharmacist
-            await safe_action("Staff Pharmacist", page.select_option("#ContentPlaceHolder1_Staff_Cat_Drop", value="4"))
-            await asyncio.sleep(1)
+            # 17. Staff Category
+            status["staff"] = await select_dropdown_robust(page, "ContentPlaceHolder1_Staff_Cat_Drop", "4", "Staff Category")
+            
+            result["field_status"] = status
+            
+            # تقرير نهائي قبل Submit
+            logger.info("📊 Final field status:")
+            for k, v in status.items():
+                logger.info(f"   {k}: {'✅' if v else '❌'}")
             
             # Screenshot قبل Submit
             screenshot_path = "/tmp/form_preview.png"
             await page.screenshot(path=screenshot_path, full_page=True)
             result["screenshot_path"] = screenshot_path
             
-            # 18. Submit - الزر نفسه يتحول إلى Yes في modal
-            logger.info("Clicking Submit (opens modal)...")
+            # Submit + Yes
+            logger.info("🚀 Clicking Submit...")
             try:
                 await page.click("#ContentPlaceHolder1_Submit_Btn", timeout=10000)
                 await asyncio.sleep(3)
-                logger.info("✅ Submit clicked - modal should open")
             except Exception as e:
-                logger.error(f"Submit error: {e}")
+                logger.error(f"Submit: {e}")
             
-            # 19. Yes button في الـ modal
-            # الزر value="Yes" data-dismiss="modal"
-            logger.info("Clicking Yes in modal...")
+            # Yes in modal
+            logger.info("👆 Clicking Yes in modal...")
             clicked_yes = False
-            
-            try:
-                await page.click("input[value='Yes'][data-dismiss='modal']", timeout=5000)
-                clicked_yes = True
-                logger.info("✅ Yes clicked (input value)")
-            except Exception as e:
-                logger.warning(f"Method 1: {e}")
-            
-            if not clicked_yes:
+            for method_name, selector in [
+                ("input value", "input[value='Yes'][data-dismiss='modal']"),
+                ("button text", "button:has-text('Yes')"),
+                ("text selector", "text=Yes"),
+            ]:
+                if clicked_yes:
+                    break
                 try:
-                    await page.evaluate("""
-                        () => {
-                            const btns = document.querySelectorAll('input[value="Yes"], button');
-                            for (const b of btns) {
-                                if ((b.value === 'Yes' || b.innerText?.trim() === 'Yes') && 
-                                    b.offsetParent !== null) {
-                                    b.click();
-                                    return true;
-                                }
-                            }
-                            return false;
-                        }
-                    """)
+                    await page.click(selector, timeout=3000)
                     clicked_yes = True
-                    logger.info("✅ Yes clicked (JS)")
+                    logger.info(f"✅ Yes clicked ({method_name})")
                 except Exception as e:
-                    logger.warning(f"Method 2: {e}")
+                    logger.warning(f"{method_name}: {e}")
             
-            await asyncio.sleep(8)
+            # JS fallback
+            if not clicked_yes:
+                await page.evaluate("""
+                    () => {
+                        const btns = document.querySelectorAll('input[value="Yes"], button');
+                        for (const b of btns) {
+                            if ((b.value === 'Yes' || b.innerText?.trim() === 'Yes') && b.offsetParent !== null) {
+                                b.click();
+                                return true;
+                            }
+                        }
+                    }
+                """)
+                logger.info("✅ Yes clicked (JS fallback)")
             
-            # Screenshot بعد Yes
+            await asyncio.sleep(10)
+            
+            # Screenshot بعد
             screenshot_after = "/tmp/form_after.png"
             await page.screenshot(path=screenshot_after, full_page=True)
             result["screenshot_after"] = screenshot_after
             
             final_url = page.url
-            logger.info(f"Final URL: {final_url}")
             result["final_url"] = final_url
+            logger.info(f"🌐 Final URL: {final_url}")
             
             result["success"] = True
             await browser.close()
             return result
             
         except Exception as e:
-            logger.error(f"Fatal: {e}")
+            logger.error(f"💥 Fatal: {e}")
             result["error"] = str(e)
             try:
                 screenshot_path = "/tmp/form_error.png"
@@ -327,7 +470,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("⚠️ اكتب الكلمة المفتاحية")
         return
     
-    await message.reply_text("⏳ جاري المعالجة...")
+    await message.reply_text("⏳ جاري المعالجة... (2-3 دقائق)")
     
     if message.photo:
         file = await context.bot.get_file(message.photo[-1].file_id)
@@ -349,10 +492,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await message.reply_text(
             f"📋 {full_data['mrn']} | {full_data['date']} | {full_data['gender']}\n"
-            f"Dx: {full_data['diagnosis']}\n\n⏳ ملء النموذج..."
+            f"Dx: {full_data['diagnosis']}\n\n⏳ ملء النموذج مع تحقق..."
         )
         
         result = await fill_form(full_data)
+        
+        # إرسال تقرير الحقول
+        if result.get("field_status"):
+            status = result["field_status"]
+            report = "📊 تقرير الحقول:\n"
+            for k, v in status.items():
+                report += f"{'✅' if v else '❌'} {k}\n"
+            await message.reply_text(report)
         
         if result.get("screenshot_path") and os.path.exists(result["screenshot_path"]):
             with open(result["screenshot_path"], "rb") as f:
