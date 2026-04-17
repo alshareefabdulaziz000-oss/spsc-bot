@@ -275,7 +275,9 @@ async def fill_all_simple_fields(page, data):
 
 
 async def fill_form(data: dict) -> dict:
-    result = {"success": False, "error": "", "screenshot_path": "", "screenshot_after": "", "field_status": {}, "all_filled": False}
+    result = {"success": False, "error": "", "field_status": {}, "all_filled": False,
+              "before_submit": "", "after_submit": "", "after_yes": "",
+              "submit_clicked": False, "yes_success": False, "modal_info": "", "final_url": ""}
     
     try:
         subprocess.run(["playwright", "install", "chromium"], check=True, capture_output=True)
@@ -285,7 +287,7 @@ async def fill_form(data: dict) -> dict:
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
         context = await browser.new_context(viewport={"width": 1280, "height": 900})
-        context.set_default_timeout(120000)  # 2 دقيقة لكل عملية
+        context.set_default_timeout(120000)
         page = await context.new_page()
         page.on("dialog", lambda dialog: asyncio.create_task(dialog.accept()))
         
@@ -312,7 +314,7 @@ async def fill_form(data: dict) -> dict:
                 logger.error(f"Type Add: {e}")
             
             # Round 2
-            logger.info("========== ROUND 2 (after Type) ==========")
+            logger.info("========== ROUND 2 ==========")
             await fill_all_simple_fields(page, data)
             await asyncio.sleep(2)
             
@@ -339,7 +341,7 @@ async def fill_form(data: dict) -> dict:
                 logger.error(f"Medication: {e}")
             
             # Round 3
-            logger.info("========== ROUND 3 (after Medication) ==========")
+            logger.info("========== ROUND 3 ==========")
             await fill_all_simple_fields(page, data)
             await asyncio.sleep(2)
             
@@ -364,12 +366,12 @@ async def fill_form(data: dict) -> dict:
             except Exception as e:
                 logger.error(f"Factor: {e}")
             
-            # Round 4 - FINAL
-            logger.info("========== ROUND 4 - FINAL ==========")
+            # Round 4 FINAL
+            logger.info("========== ROUND 4 FINAL ==========")
             await fill_all_simple_fields(page, data)
             await asyncio.sleep(3)
             
-            # تحقق
+            # تحقق نهائي
             final_check = await page.evaluate("""
                 () => ({
                     mrn: document.getElementById('ContentPlaceHolder1_Mr_Txt')?.value || '',
@@ -388,7 +390,6 @@ async def fill_form(data: dict) -> dict:
                     wasfaty_other: document.getElementById('ContentPlaceHolder1_Wasfaty_Chk_0')?.checked || false
                 })
             """)
-            
             logger.info(f"🔍 FINAL: {final_check}")
             
             status = {
@@ -407,7 +408,6 @@ async def fill_form(data: dict) -> dict:
                 "reach_no": final_check.get('reach_no', False),
                 "prescription": final_check.get('wasfaty_other', False),
             }
-            
             result["field_status"] = status
             
             critical = ["reach_no", "date", "prescription", "stage", "description", "diagnosis", "action",
@@ -415,60 +415,129 @@ async def fill_form(data: dict) -> dict:
             all_ok = all(status.get(f, False) for f in critical)
             result["all_filled"] = all_ok
             
-            screenshot_path = "/tmp/form_preview.png"
-            await page.screenshot(path=screenshot_path, full_page=True)
-            result["screenshot_path"] = screenshot_path
-            
             # Submit
             if all_ok:
-                logger.info("🚀 Submitting...")
-                try:
-                    await page.click("#ContentPlaceHolder1_Submit_Btn", timeout=15000)
-                    await asyncio.sleep(5)
-                except Exception as e:
-                    logger.error(f"Submit: {e}")
+                logger.info("🚀 Starting Submit sequence...")
                 
-                # Yes - عدة محاولات مع وقت طويل
-                for yes_attempt in range(3):
-                    logger.info(f"👆 Yes attempt {yes_attempt+1}...")
+                # التمرير إلى Submit
+                await page.evaluate("""
+                    () => {
+                        const btn = document.getElementById('ContentPlaceHolder1_Submit_Btn');
+                        if (btn) btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }
+                """)
+                await asyncio.sleep(2)
+                
+                # Screenshot قبل Submit
+                await page.screenshot(path="/tmp/before_submit.png", full_page=True)
+                result["before_submit"] = "/tmp/before_submit.png"
+                
+                # اضغط Submit
+                submit_clicked = False
+                try:
+                    await page.click("#ContentPlaceHolder1_Submit_Btn", timeout=15000, force=True)
+                    submit_clicked = True
+                    logger.info("✅ Submit clicked (Playwright)")
+                except Exception as e:
+                    logger.error(f"Submit Playwright: {e}")
+                
+                if not submit_clicked:
+                    try:
+                        await page.evaluate("""
+                            () => {
+                                const btn = document.getElementById('ContentPlaceHolder1_Submit_Btn');
+                                if (btn) { btn.click(); return true; }
+                                return false;
+                            }
+                        """)
+                        submit_clicked = True
+                        logger.info("✅ Submit clicked (JS)")
+                    except Exception as e:
+                        logger.error(f"Submit JS: {e}")
+                
+                result["submit_clicked"] = submit_clicked
+                
+                # ننتظر الـ modal
+                await asyncio.sleep(5)
+                
+                # Screenshot بعد Submit
+                await page.screenshot(path="/tmp/after_submit.png", full_page=True)
+                result["after_submit"] = "/tmp/after_submit.png"
+                
+                # فحص Modal
+                modal_visible = await page.evaluate("""
+                    () => {
+                        const modals = document.querySelectorAll('.modal, [role="dialog"]');
+                        const visible = [];
+                        for (const m of modals) {
+                            const style = window.getComputedStyle(m);
+                            if (style.display !== 'none' && m.offsetParent !== null) {
+                                visible.push({
+                                    id: m.id,
+                                    classes: m.className,
+                                    text: m.innerText.substring(0, 200)
+                                });
+                            }
+                        }
+                        return visible;
+                    }
+                """)
+                logger.info(f"🔍 Visible modals: {modal_visible}")
+                result["modal_info"] = str(modal_visible)
+                
+                # Yes - 5 محاولات
+                yes_success = False
+                for yes_attempt in range(5):
+                    logger.info(f"👆 Yes attempt {yes_attempt+1}/5...")
+                    
                     yes_result = await page.evaluate("""
                         () => {
-                            const selectors = [
-                                'input[value="Yes"][data-dismiss="modal"]',
-                                '.modal.show input[value="Yes"]',
-                                '.modal.in input[value="Yes"]',
-                                '.modal[style*="display: block"] input[value="Yes"]',
-                            ];
-                            for (const sel of selectors) {
-                                const el = document.querySelector(sel);
-                                if (el) {
-                                    el.click();
-                                    return 'clicked: ' + sel;
-                                }
-                            }
-                            const all = document.querySelectorAll('input[type="button"], button');
-                            for (const b of all) {
-                                const text = b.value || b.innerText || '';
-                                if (text.trim() === 'Yes' && b.offsetParent !== null) {
+                            const allButtons = document.querySelectorAll('input[type="button"], input[type="submit"], button, a');
+                            const found = [];
+                            
+                            for (const b of allButtons) {
+                                const text = (b.value || b.innerText || '').trim();
+                                const visible = b.offsetParent !== null;
+                                
+                                if (visible && text === 'Yes') {
                                     b.click();
-                                    return 'clicked: generic';
+                                    return {clicked: true, id: b.id, value: b.value, text: text};
+                                }
+                                
+                                if (visible && text.includes('Yes')) {
+                                    found.push({id: b.id, value: b.value, text: text});
                                 }
                             }
-                            return 'not found';
+                            
+                            return {clicked: false, found: found};
                         }
                     """)
-                    logger.info(f"Yes: {yes_result}")
-                    if 'clicked' in yes_result:
+                    
+                    logger.info(f"Yes result: {yes_result}")
+                    
+                    if yes_result.get('clicked'):
+                        yes_success = True
+                        logger.info("✅ Yes clicked!")
                         break
+                    
                     await asyncio.sleep(2)
                 
+                result["yes_success"] = yes_success
+                
+                # انتظر الحفظ
                 await asyncio.sleep(15)
+                
+                # Screenshot بعد Yes
+                await page.screenshot(path="/tmp/after_yes.png", full_page=True)
+                result["after_yes"] = "/tmp/after_yes.png"
+                
+                logger.info(f"Submit: {submit_clicked}, Yes: {yes_success}")
+            else:
+                # Screenshot حتى لو ما كمل
+                await page.screenshot(path="/tmp/before_submit.png", full_page=True)
+                result["before_submit"] = "/tmp/before_submit.png"
             
-            screenshot_after = "/tmp/form_after.png"
-            await page.screenshot(path=screenshot_after, full_page=True)
-            result["screenshot_after"] = screenshot_after
             result["final_url"] = page.url
-            
             result["success"] = True
             await browser.close()
             return result
@@ -478,7 +547,7 @@ async def fill_form(data: dict) -> dict:
             result["error"] = str(e)
             try:
                 await page.screenshot(path="/tmp/form_error.png", full_page=True)
-                result["screenshot_path"] = "/tmp/form_error.png"
+                result["before_submit"] = "/tmp/form_error.png"
             except: pass
             try: await browser.close()
             except: pass
@@ -497,7 +566,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await message.reply_text("⏳ جاري المعالجة... (5-7 دقائق، خذ فنجان قهوة ☕)")
     
-    # Heartbeat للحفاظ على الاتصال
+    # Heartbeat
     heartbeat_running = True
     async def heartbeat():
         while heartbeat_running:
@@ -528,11 +597,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await message.reply_text(
             f"📋 {full_data['mrn']} | {full_data['date']} | {full_data['gender']}\n"
-            f"Dx: {full_data['diagnosis']}\n\n⏳ ملء النموذج (4 جولات)..."
+            f"Dx: {full_data['diagnosis']}\n\n⏳ ملء النموذج..."
         )
         
         result = await fill_form(full_data)
         
+        # تقرير الحقول
         if result.get("field_status"):
             status = result["field_status"]
             report = "📊 تقرير من الموقع الحقيقي:\n"
@@ -540,24 +610,44 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 report += f"{'✅' if v else '❌'} {k}\n"
             
             if result.get("all_filled"):
-                report += "\n✅ الكل ممتلئ — تم الإرسال"
+                report += "\n✅ الكل ممتلئ"
             else:
                 report += "\n⚠️ بعض الحقول فاضية"
             
             await message.reply_text(report)
         
-        if result.get("screenshot_path") and os.path.exists(result["screenshot_path"]):
-            with open(result["screenshot_path"], "rb") as f:
-                await message.reply_photo(photo=f, caption="📸 قبل Submit")
+        # Screenshots التشخيصية
+        screenshots = [
+            ("before_submit", "📸 1. قبل Submit"),
+            ("after_submit", "📸 2. بعد Submit (هل modal ظهر؟)"),
+            ("after_yes", "📸 3. بعد Yes (هل صفحة النجاح؟)"),
+        ]
         
-        if result.get("screenshot_after") and os.path.exists(result["screenshot_after"]):
-            with open(result["screenshot_after"], "rb") as f:
-                await message.reply_photo(photo=f, caption=f"📸 بعد\n{result.get('final_url', '')}")
+        for key, caption in screenshots:
+            path = result.get(key)
+            if path and os.path.exists(path):
+                try:
+                    with open(path, "rb") as f:
+                        await message.reply_photo(photo=f, caption=caption)
+                except Exception as e:
+                    logger.error(f"Send {key}: {e}")
         
-        if result["success"] and result.get("all_filled"):
+        # تقرير تشخيصي
+        diag = f"🔍 Submit: {'✅' if result.get('submit_clicked') else '❌'}\n"
+        diag += f"🔍 Yes: {'✅' if result.get('yes_success') else '❌'}\n"
+        diag += f"🔍 URL: {result.get('final_url', 'N/A')}\n\n"
+        modal = result.get('modal_info', 'N/A')
+        if len(modal) > 300:
+            modal = modal[:300] + "..."
+        diag += f"🔍 Modals: {modal}"
+        await message.reply_text(diag)
+        
+        if result["success"] and result.get("all_filled") and result.get("yes_success"):
             await message.reply_text("Done ✔️ تحقق من الموقع")
+        elif result["success"] and result.get("all_filled"):
+            await message.reply_text("⚠️ Submit ضُغط لكن Yes فشل")
         elif result["success"]:
-            await message.reply_text("⚠️ لم يُرسل")
+            await message.reply_text("⚠️ الحقول غير مكتملة")
         else:
             await message.reply_text(f"⚠️ {result.get('error', '')}")
     except Exception as e:
