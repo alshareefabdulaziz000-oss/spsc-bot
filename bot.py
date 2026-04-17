@@ -70,7 +70,7 @@ def get_case_details(keyword: str) -> dict:
 async def fill_text(page, field_id: str, value: str, name: str) -> bool:
     for attempt in range(3):
         try:
-            await page.wait_for_selector(f"#{field_id}", state="attached", timeout=10000)
+            await page.wait_for_selector(f"#{field_id}", state="attached", timeout=15000)
             await page.click(f"#{field_id}")
             await asyncio.sleep(0.3)
             await page.fill(f"#{field_id}", "")
@@ -94,7 +94,6 @@ async def fill_text(page, field_id: str, value: str, name: str) -> bool:
         except Exception as e:
             logger.error(f"Attempt {attempt+1} {name}: {e}")
             await asyncio.sleep(1)
-    logger.error(f"❌ {name} FAILED")
     return False
 
 
@@ -107,7 +106,6 @@ async def fill_text_by_name(page, field_name: str, value: str, name: str) -> boo
                     if (!el) el = document.getElementById('ContentPlaceHolder1_{field_name}');
                     if (!el) el = document.querySelector(`[name="{field_name}"]`);
                     if (!el) el = document.querySelector(`[name*="{field_name}" i]`);
-                    
                     if (!el) {{
                         const all = document.querySelectorAll('input[type="text"], textarea');
                         for (const i of all) {{
@@ -118,7 +116,6 @@ async def fill_text_by_name(page, field_name: str, value: str, name: str) -> boo
                             }}
                         }}
                     }}
-                    
                     if (el) {{
                         el.value = '{value}';
                         el.dispatchEvent(new Event('input', {{ bubbles: true }}));
@@ -129,13 +126,12 @@ async def fill_text_by_name(page, field_name: str, value: str, name: str) -> boo
                     return null;
                 }}
             """)
-            
             if filled:
-                logger.info(f"✅ {name}: filled via '{filled}'")
+                logger.info(f"✅ {name}: '{filled}'")
                 return True
             await asyncio.sleep(1)
         except Exception as e:
-            logger.error(f"Attempt {attempt+1} {name}: {e}")
+            logger.error(f"{name}: {e}")
             await asyncio.sleep(1)
     return False
 
@@ -143,29 +139,23 @@ async def fill_text_by_name(page, field_name: str, value: str, name: str) -> boo
 async def select_option_by_label(page, field_id: str, label_text: str, name: str) -> bool:
     for attempt in range(3):
         try:
-            await page.wait_for_selector(f"#{field_id}", state="attached", timeout=10000)
+            await page.wait_for_selector(f"#{field_id}", state="attached", timeout=15000)
             value = await page.evaluate(f"""
                 () => {{
                     const sel = document.getElementById('{field_id}');
                     if (!sel) return null;
                     const target = '{label_text}'.toLowerCase();
                     for (let i = 0; i < sel.options.length; i++) {{
-                        if (sel.options[i].text.toLowerCase() === target) {{
-                            return sel.options[i].value;
-                        }}
+                        if (sel.options[i].text.toLowerCase() === target) return sel.options[i].value;
                     }}
                     for (let i = 0; i < sel.options.length; i++) {{
-                        if (sel.options[i].text.toLowerCase().includes(target)) {{
-                            return sel.options[i].value;
-                        }}
+                        if (sel.options[i].text.toLowerCase().includes(target)) return sel.options[i].value;
                     }}
                     return null;
                 }}
             """)
             if not value:
-                logger.error(f"❌ {name}: label '{label_text}' not found")
                 return False
-            
             await page.select_option(f"#{field_id}", value=value)
             await page.evaluate(f"""
                 () => {{
@@ -176,11 +166,11 @@ async def select_option_by_label(page, field_id: str, label_text: str, name: str
             await asyncio.sleep(0.5)
             actual = await page.evaluate(f"""() => document.getElementById('{field_id}')?.value || ''""")
             if actual == value:
-                logger.info(f"✅ {name}: value={value}")
+                logger.info(f"✅ {name}: {value}")
                 return True
             await asyncio.sleep(1)
         except Exception as e:
-            logger.error(f"Attempt {attempt+1} {name}: {e}")
+            logger.error(f"{name}: {e}")
             await asyncio.sleep(1)
     return False
 
@@ -189,11 +179,10 @@ async def click_radio_hard(page, radio_id: str, name: str) -> bool:
     for attempt in range(3):
         try:
             try:
-                await page.click(f"#{radio_id}", timeout=3000, force=True)
+                await page.click(f"#{radio_id}", timeout=5000, force=True)
             except:
                 pass
             await asyncio.sleep(0.3)
-            
             await page.evaluate(f"""
                 () => {{
                     const el = document.getElementById('{radio_id}');
@@ -206,44 +195,26 @@ async def click_radio_hard(page, radio_id: str, name: str) -> bool:
                 }}
             """)
             await asyncio.sleep(0.5)
-            
             checked = await page.evaluate(f"() => document.getElementById('{radio_id}')?.checked")
             if checked:
-                logger.info(f"✅ Radio {name} checked")
+                logger.info(f"✅ Radio {name}")
                 return True
-            
-            try:
-                await page.click(f"label[for='{radio_id}']", timeout=2000)
-                await asyncio.sleep(0.3)
-                checked2 = await page.evaluate(f"() => document.getElementById('{radio_id}')?.checked")
-                if checked2:
-                    logger.info(f"✅ Radio {name} checked (label)")
-                    return True
-            except:
-                pass
-            
             await asyncio.sleep(1)
         except Exception as e:
-            logger.error(f"Radio {name} attempt {attempt+1}: {e}")
+            logger.error(f"Radio {name}: {e}")
             await asyncio.sleep(1)
     return False
 
 
 async def fill_all_simple_fields(page, data):
-    """تملأ كل الحقول البسيطة مرة واحدة"""
     logger.info("📝 Filling ALL simple fields...")
-    
-    # Radios
     await click_radio_hard(page, "ContentPlaceHolder1_ErrorReachPatient_1", "Reach No")
     await asyncio.sleep(0.3)
     await click_radio_hard(page, "ContentPlaceHolder1_Wasfaty_Chk_0", "Prescription Other/s")
     await asyncio.sleep(0.5)
-    
-    # Other ER
     await fill_text_by_name(page, "other", "ER", "Other ER")
     await asyncio.sleep(0.3)
     
-    # Event Date
     date_parts = data['date'].split('/')
     if len(date_parts) == 3:
         dd, mm, yyyy = date_parts
@@ -276,12 +247,10 @@ async def fill_all_simple_fields(page, data):
     """)
     await asyncio.sleep(0.5)
     
-    # كل الحقول النصية
     await fill_text(page, "ContentPlaceHolder1_Mr_Txt", data['mrn'], "MRN")
     await select_option_by_label(page, "ContentPlaceHolder1_Gender_Drop", data['gender'], "Gender")
     await select_option_by_label(page, "ContentPlaceHolder1_WhereItHappen_Drop", "ER Adult", "Where")
     
-    # Diagnosis
     try:
         await page.click("#ContentPlaceHolder1_txtDiagnosis")
         await asyncio.sleep(0.5)
@@ -316,42 +285,38 @@ async def fill_form(data: dict) -> dict:
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
         context = await browser.new_context(viewport={"width": 1280, "height": 900})
+        context.set_default_timeout(120000)  # 2 دقيقة لكل عملية
         page = await context.new_page()
         page.on("dialog", lambda dialog: asyncio.create_task(dialog.accept()))
         
         try:
             logger.info("🌐 Opening form...")
-            await page.goto(FORM_URL, wait_until="networkidle", timeout=90000)
+            await page.goto(FORM_URL, wait_until="networkidle", timeout=120000)
             await asyncio.sleep(5)
             
-            # ============ الجولة 1: كل الحقول البسيطة ============
-            logger.info("========== ROUND 1: ALL SIMPLE FIELDS ==========")
+            # Round 1
+            logger.info("========== ROUND 1 ==========")
             await fill_all_simple_fields(page, data)
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
             
-            # ============ Type of Error + Add (postback) ============
-            logger.info("========== Type of Error + Add ==========")
-            type_labels = {
-                "12": "Wrong/missed indication",
-                "9": "wrong/missed duration",
-                "1": "Wrong/missed dose"
-            }
+            # Type + Add
+            logger.info("========== Type + Add ==========")
+            type_labels = {"12": "Wrong/missed indication", "9": "wrong/missed duration", "1": "Wrong/missed dose"}
             type_label = type_labels.get(data['type_of_error'], "Wrong/missed indication")
-            await select_option_by_label(page, "ContentPlaceHolder1_ddlNewTypeOfError", type_label, "Type of Error")
+            await select_option_by_label(page, "ContentPlaceHolder1_ddlNewTypeOfError", type_label, "Type")
             await asyncio.sleep(0.5)
             try:
-                await page.click("#ContentPlaceHolder1_NewTypeOfError_Main_Btn", timeout=5000)
-                await asyncio.sleep(4)
-                logger.info("✅ Type Add done")
+                await page.click("#ContentPlaceHolder1_NewTypeOfError_Main_Btn", timeout=10000)
+                await asyncio.sleep(5)
             except Exception as e:
                 logger.error(f"Type Add: {e}")
             
-            # ============ إعادة ملء الحقول بعد postback ============
-            logger.info("========== ROUND 2: Refill after Type postback ==========")
+            # Round 2
+            logger.info("========== ROUND 2 (after Type) ==========")
             await fill_all_simple_fields(page, data)
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
             
-            # ============ Medication + Add (postback) ============
+            # Medication + Add
             logger.info("========== Medication + Add ==========")
             try:
                 med_value = await page.evaluate(f"""
@@ -360,9 +325,7 @@ async def fill_form(data: dict) -> dict:
                         if (!sel) return null;
                         const term = '{data['medication_search']}'.toLowerCase();
                         for (let i = 0; i < sel.options.length; i++) {{
-                            if (sel.options[i].text.toLowerCase().includes(term)) {{
-                                return sel.options[i].value;
-                            }}
+                            if (sel.options[i].text.toLowerCase().includes(term)) return sel.options[i].value;
                         }}
                         return null;
                     }}
@@ -370,18 +333,17 @@ async def fill_form(data: dict) -> dict:
                 if med_value:
                     await page.select_option("#ContentPlaceHolder1_Generic_Name_Drop", value=med_value)
                     await asyncio.sleep(0.5)
-                    await page.click("#ContentPlaceHolder1_Add_Med")
-                    await asyncio.sleep(4)
-                    logger.info("✅ Medication Add done")
+                    await page.click("#ContentPlaceHolder1_Add_Med", timeout=10000)
+                    await asyncio.sleep(5)
             except Exception as e:
                 logger.error(f"Medication: {e}")
             
-            # ============ إعادة ملء الحقول بعد postback ============
-            logger.info("========== ROUND 3: Refill after Medication ==========")
+            # Round 3
+            logger.info("========== ROUND 3 (after Medication) ==========")
             await fill_all_simple_fields(page, data)
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
             
-            # ============ Factor + Add (postback) ============
+            # Factor + Add
             logger.info("========== Factor + Add ==========")
             try:
                 factor_value = await page.evaluate("""
@@ -389,9 +351,7 @@ async def fill_form(data: dict) -> dict:
                         const sel = document.getElementById('ContentPlaceHolder1_Factors_Drop');
                         if (!sel) return null;
                         for (let i = 0; i < sel.options.length; i++) {
-                            if (sel.options[i].text.toLowerCase().includes('lack of knowledge')) {
-                                return sel.options[i].value;
-                            }
+                            if (sel.options[i].text.toLowerCase().includes('lack of knowledge')) return sel.options[i].value;
                         }
                         return null;
                     }
@@ -399,38 +359,34 @@ async def fill_form(data: dict) -> dict:
                 if factor_value:
                     await page.select_option("#ContentPlaceHolder1_Factors_Drop", value=factor_value)
                     await asyncio.sleep(0.5)
-                    await page.click("#ContentPlaceHolder1_Factors_Main_Btn")
-                    await asyncio.sleep(4)
-                    logger.info("✅ Factor Add done")
+                    await page.click("#ContentPlaceHolder1_Factors_Main_Btn", timeout=10000)
+                    await asyncio.sleep(5)
             except Exception as e:
                 logger.error(f"Factor: {e}")
             
-            # ============ ROUND 4: إعادة أخيرة قبل Submit ============
-            logger.info("========== ROUND 4: FINAL refill ==========")
+            # Round 4 - FINAL
+            logger.info("========== ROUND 4 - FINAL ==========")
             await fill_all_simple_fields(page, data)
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
             
-            # ============ تحقق نهائي ============
-            logger.info("🔍 Final verification...")
+            # تحقق
             final_check = await page.evaluate("""
-                () => {
-                    return {
-                        mrn: document.getElementById('ContentPlaceHolder1_Mr_Txt')?.value || '',
-                        date: document.getElementById('ContentPlaceHolder1_Event_Date_Txt')?.value || '',
-                        gender: document.getElementById('ContentPlaceHolder1_Gender_Drop')?.value || '',
-                        where: document.getElementById('ContentPlaceHolder1_WhereItHappen_Drop')?.value || '',
-                        diagnosis: document.getElementById('ContentPlaceHolder1_txtDiagnosis')?.value || '',
-                        description: document.getElementById('ContentPlaceHolder1_Event_Desc_Txt')?.value || '',
-                        reporter: document.getElementById('ContentPlaceHolder1_Reporter_Name_Txt')?.value || '',
-                        email: document.getElementById('ContentPlaceHolder1_Reporter_Email_Txt')?.value || '',
-                        mobile: document.getElementById('ContentPlaceHolder1_Reporter_Mobile_Txt')?.value || '',
-                        stage: document.getElementById('ContentPlaceHolder1_ME_Type_Drop')?.value || '',
-                        action: document.getElementById('ContentPlaceHolder1_ActionTaken_Drop')?.value || '',
-                        staff: document.getElementById('ContentPlaceHolder1_Staff_Cat_Drop')?.value || '',
-                        reach_no: document.getElementById('ContentPlaceHolder1_ErrorReachPatient_1')?.checked || false,
-                        wasfaty_other: document.getElementById('ContentPlaceHolder1_Wasfaty_Chk_0')?.checked || false
-                    };
-                }
+                () => ({
+                    mrn: document.getElementById('ContentPlaceHolder1_Mr_Txt')?.value || '',
+                    date: document.getElementById('ContentPlaceHolder1_Event_Date_Txt')?.value || '',
+                    gender: document.getElementById('ContentPlaceHolder1_Gender_Drop')?.value || '',
+                    where: document.getElementById('ContentPlaceHolder1_WhereItHappen_Drop')?.value || '',
+                    diagnosis: document.getElementById('ContentPlaceHolder1_txtDiagnosis')?.value || '',
+                    description: document.getElementById('ContentPlaceHolder1_Event_Desc_Txt')?.value || '',
+                    reporter: document.getElementById('ContentPlaceHolder1_Reporter_Name_Txt')?.value || '',
+                    email: document.getElementById('ContentPlaceHolder1_Reporter_Email_Txt')?.value || '',
+                    mobile: document.getElementById('ContentPlaceHolder1_Reporter_Mobile_Txt')?.value || '',
+                    stage: document.getElementById('ContentPlaceHolder1_ME_Type_Drop')?.value || '',
+                    action: document.getElementById('ContentPlaceHolder1_ActionTaken_Drop')?.value || '',
+                    staff: document.getElementById('ContentPlaceHolder1_Staff_Cat_Drop')?.value || '',
+                    reach_no: document.getElementById('ContentPlaceHolder1_ErrorReachPatient_1')?.checked || false,
+                    wasfaty_other: document.getElementById('ContentPlaceHolder1_Wasfaty_Chk_0')?.checked || false
+                })
             """)
             
             logger.info(f"🔍 FINAL: {final_check}")
@@ -454,14 +410,11 @@ async def fill_form(data: dict) -> dict:
             
             result["field_status"] = status
             
-            critical = ["reach_no", "date", "prescription", "stage", "description", 
-                       "diagnosis", "action", "mrn", "gender", "where", "reporter", "email", "mobile", "staff"]
+            critical = ["reach_no", "date", "prescription", "stage", "description", "diagnosis", "action",
+                       "mrn", "gender", "where", "reporter", "email", "mobile", "staff"]
             all_ok = all(status.get(f, False) for f in critical)
             result["all_filled"] = all_ok
             
-            logger.info(f"📊 ALL FILLED: {all_ok}")
-            
-            # Screenshot قبل
             screenshot_path = "/tmp/form_preview.png"
             await page.screenshot(path=screenshot_path, full_page=True)
             result["screenshot_path"] = screenshot_path
@@ -470,42 +423,46 @@ async def fill_form(data: dict) -> dict:
             if all_ok:
                 logger.info("🚀 Submitting...")
                 try:
-                    await page.click("#ContentPlaceHolder1_Submit_Btn", timeout=10000)
-                    await asyncio.sleep(4)
+                    await page.click("#ContentPlaceHolder1_Submit_Btn", timeout=15000)
+                    await asyncio.sleep(5)
                 except Exception as e:
                     logger.error(f"Submit: {e}")
                 
-                # Yes
-                yes_clicked = await page.evaluate("""
-                    () => {
-                        const selectors = [
-                            'input[value="Yes"][data-dismiss="modal"]',
-                            '.modal.show input[value="Yes"]',
-                            '.modal.in input[value="Yes"]',
-                            '.modal[style*="display: block"] input[value="Yes"]',
-                        ];
-                        for (const sel of selectors) {
-                            const el = document.querySelector(sel);
-                            if (el) {
-                                el.click();
-                                return 'clicked: ' + sel;
+                # Yes - عدة محاولات مع وقت طويل
+                for yes_attempt in range(3):
+                    logger.info(f"👆 Yes attempt {yes_attempt+1}...")
+                    yes_result = await page.evaluate("""
+                        () => {
+                            const selectors = [
+                                'input[value="Yes"][data-dismiss="modal"]',
+                                '.modal.show input[value="Yes"]',
+                                '.modal.in input[value="Yes"]',
+                                '.modal[style*="display: block"] input[value="Yes"]',
+                            ];
+                            for (const sel of selectors) {
+                                const el = document.querySelector(sel);
+                                if (el) {
+                                    el.click();
+                                    return 'clicked: ' + sel;
+                                }
                             }
-                        }
-                        const all = document.querySelectorAll('input[type="button"], button');
-                        for (const b of all) {
-                            const text = b.value || b.innerText || '';
-                            if (text.trim() === 'Yes' && b.offsetParent !== null) {
-                                b.click();
-                                return 'clicked: generic';
+                            const all = document.querySelectorAll('input[type="button"], button');
+                            for (const b of all) {
+                                const text = b.value || b.innerText || '';
+                                if (text.trim() === 'Yes' && b.offsetParent !== null) {
+                                    b.click();
+                                    return 'clicked: generic';
+                                }
                             }
+                            return 'not found';
                         }
-                        return 'not found';
-                    }
-                """)
-                logger.info(f"Yes: {yes_clicked}")
-                await asyncio.sleep(10)
-            else:
-                logger.warning("⚠️ NOT all filled — SKIPPING Submit")
+                    """)
+                    logger.info(f"Yes: {yes_result}")
+                    if 'clicked' in yes_result:
+                        break
+                    await asyncio.sleep(2)
+                
+                await asyncio.sleep(15)
             
             screenshot_after = "/tmp/form_after.png"
             await page.screenshot(path=screenshot_after, full_page=True)
@@ -517,7 +474,7 @@ async def fill_form(data: dict) -> dict:
             return result
             
         except Exception as e:
-            logger.error(f"💥 Fatal: {e}")
+            logger.error(f"💥 {e}")
             result["error"] = str(e)
             try:
                 await page.screenshot(path="/tmp/form_error.png", full_page=True)
@@ -538,7 +495,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("⚠️ اكتب الكلمة المفتاحية")
         return
     
-    await message.reply_text("⏳ جاري المعالجة... (4-5 دقائق)")
+    await message.reply_text("⏳ جاري المعالجة... (5-7 دقائق، خذ فنجان قهوة ☕)")
+    
+    # Heartbeat للحفاظ على الاتصال
+    heartbeat_running = True
+    async def heartbeat():
+        while heartbeat_running:
+            await asyncio.sleep(25)
+            try:
+                await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
+            except:
+                pass
+    heartbeat_task = asyncio.create_task(heartbeat())
     
     if message.photo:
         file = await context.bot.get_file(message.photo[-1].file_id)
@@ -574,7 +542,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if result.get("all_filled"):
                 report += "\n✅ الكل ممتلئ — تم الإرسال"
             else:
-                report += "\n⚠️ بعض الحقول فاضية — لم يتم الإرسال"
+                report += "\n⚠️ بعض الحقول فاضية"
             
             await message.reply_text(report)
         
@@ -589,19 +557,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if result["success"] and result.get("all_filled"):
             await message.reply_text("Done ✔️ تحقق من الموقع")
         elif result["success"]:
-            await message.reply_text("⚠️ لم يُرسل — تحقق من الحقول الناقصة")
+            await message.reply_text("⚠️ لم يُرسل")
         else:
             await message.reply_text(f"⚠️ {result.get('error', '')}")
     except Exception as e:
-        logger.error(f"Error: {e}")
+        logger.error(f"{e}")
         await message.reply_text(f"❌ {str(e)}")
     finally:
-        try: os.unlink(image_path)
-        except: pass
+        heartbeat_running = False
+        try:
+            heartbeat_task.cancel()
+        except:
+            pass
+        try:
+            os.unlink(image_path)
+        except:
+            pass
 
 
 def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app = Application.builder().token(TELEGRAM_TOKEN).read_timeout(600).write_timeout(600).connect_timeout(600).pool_timeout(600).build()
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_message))
     logger.info("Bot started...")
     app.run_polling(drop_pending_updates=True)
