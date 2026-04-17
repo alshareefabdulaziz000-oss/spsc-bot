@@ -30,70 +30,42 @@ def extract_from_image(image_path: str) -> dict:
     model = genai.GenerativeModel("gemini-flash-latest")
     with open(image_path, "rb") as f:
         image_data = f.read()
-    
     prompt = """من صورة الوصفة الطبية، استخرج:
-1. MRN (رقم المريض)
-2. DATE (تاريخ الوصفة بصيغة DD/MM/YYYY)
+1. MRN
+2. DATE (DD/MM/YYYY)
 3. GENDER (Male أو Female)
-4. DIAGNOSIS (من قسم Indication، اكتب EMPTY إذا فاضي)
+4. DIAGNOSIS (من Indication، EMPTY إذا فاضي)
 
-أجب بهذا الشكل فقط:
+أجب:
 MRN: xxxxx
 DATE: DD/MM/YYYY
 GENDER: Male
 DIAGNOSIS: xxxxx"""
     
-    response = model.generate_content([
-        prompt,
-        {"mime_type": "image/jpeg", "data": image_data}
-    ])
-    
+    response = model.generate_content([prompt, {"mime_type": "image/jpeg", "data": image_data}])
     text = response.text.strip()
     result = {"mrn": "", "date": "", "gender": "Male", "diagnosis": ""}
-    
     for line in text.split("\n"):
         line = line.strip()
-        if line.startswith("MRN:"):
-            result["mrn"] = line.split("MRN:")[1].strip()
-        elif line.startswith("DATE:"):
-            result["date"] = line.split("DATE:")[1].strip()
-        elif line.startswith("GENDER:"):
-            result["gender"] = line.split("GENDER:")[1].strip()
-        elif line.startswith("DIAGNOSIS:"):
-            result["diagnosis"] = line.split("DIAGNOSIS:")[1].strip()
-    
+        if line.startswith("MRN:"): result["mrn"] = line.split("MRN:")[1].strip()
+        elif line.startswith("DATE:"): result["date"] = line.split("DATE:")[1].strip()
+        elif line.startswith("GENDER:"): result["gender"] = line.split("GENDER:")[1].strip()
+        elif line.startswith("DIAGNOSIS:"): result["diagnosis"] = line.split("DIAGNOSIS:")[1].strip()
     if not result["diagnosis"] or result["diagnosis"].upper() == "EMPTY":
         result["diagnosis"] = "headache"
-    
     return result
 
 
 def get_case_details(keyword: str) -> dict:
     k = keyword.lower().strip()
     if k == "omeprazole":
-        return {
-            "description": "Doctor write medicine out of privilege",
-            "medication_search": "omeprazole",
-            "type_of_error": "12",
-        }
+        return {"description": "Doctor write medicine out of privilege", "medication_search": "omeprazole", "type_of_error": "12"}
     elif k == "3 days":
-        return {
-            "description": "Doctor wrote medicine more than 3 days",
-            "medication_search": "paracetamol",
-            "type_of_error": "9",
-        }
+        return {"description": "Doctor wrote medicine more than 3 days", "medication_search": "paracetamol", "type_of_error": "9"}
     elif k == "no diagnosis":
-        return {
-            "description": "Didn't write the diagnosis",
-            "medication_search": "paracetamol",
-            "type_of_error": "12",
-        }
+        return {"description": "Didn't write the diagnosis", "medication_search": "paracetamol", "type_of_error": "12"}
     else:
-        return {
-            "description": keyword,
-            "medication_search": keyword,
-            "type_of_error": "1",
-        }
+        return {"description": keyword, "medication_search": keyword, "type_of_error": "1"}
 
 
 async def safe_action(name, coro):
@@ -118,7 +90,6 @@ async def fill_form(data: dict) -> dict:
         browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
         context = await browser.new_context(viewport={"width": 1280, "height": 900})
         page = await context.new_page()
-        
         page.on("dialog", lambda dialog: asyncio.create_task(dialog.accept()))
         
         try:
@@ -130,27 +101,48 @@ async def fill_form(data: dict) -> dict:
             await safe_action("Reach Patient No", page.click("#ContentPlaceHolder1_ErrorReachPatient_0"))
             await asyncio.sleep(0.5)
             
-            # 2. Event Date - نعبّي الحقلين المرئي والمخفي بصيغة تشمل الوقت
-            # الصيغة المطلوبة: DD/MM/YYYY HH:MM AM
-            date_full = f"{data['date']} 10:00 AM"
+            # 2. Event Date - الحل الكامل
+            # بنحاول نستخدم الـ datetimepicker API لأن الحقل datetimepicker من bootstrap
+            date_parts = data['date'].split('/')  # DD/MM/YYYY
+            if len(date_parts) == 3:
+                dd, mm, yyyy = date_parts
+                # صيغة moment.js: YYYY-MM-DD HH:mm
+                iso_date = f"{yyyy}-{mm.zfill(2)}-{dd.zfill(2)} 10:00"
+            else:
+                iso_date = f"2026-04-15 10:00"
+            
             date_js = f"""
                 () => {{
                     const visible = document.getElementById('ContentPlaceHolder1_Event_Date_Txt');
                     const hidden = document.getElementById('ContentPlaceHolder1_hdnEvent_Dt_Txt');
+                    
+                    // محاولة 1: استخدام jQuery datetimepicker API
+                    try {{
+                        if (typeof $ !== 'undefined' && $(visible).data('DateTimePicker')) {{
+                            $(visible).data('DateTimePicker').date(moment('{iso_date}'));
+                        }}
+                    }} catch(e) {{ console.log(e); }}
+                    
+                    // محاولة 2: إزالة readonly والكتابة المباشرة
                     if (visible) {{
                         visible.removeAttribute('readonly');
-                        visible.value = '{date_full}';
+                        visible.value = '{data['date']} 10:00 AM';
                         visible.dispatchEvent(new Event('input', {{ bubbles: true }}));
                         visible.dispatchEvent(new Event('change', {{ bubbles: true }}));
                         visible.dispatchEvent(new Event('blur', {{ bubbles: true }}));
                     }}
+                    
+                    // محاولة 3: ملء الحقل المخفي بصيغ مختلفة
                     if (hidden) {{
-                        hidden.value = '{date_full}';
+                        hidden.value = '{data['date']} 10:00 AM';
                         hidden.dispatchEvent(new Event('change', {{ bubbles: true }}));
                     }}
+                    
+                    return {{visible: visible?.value, hidden: hidden?.value}};
                 }}
             """
-            await safe_action("Event Date", page.evaluate(date_js))
+            date_result = await page.evaluate(date_js)
+            logger.info(f"Date set: {date_result}")
             await asyncio.sleep(1)
             
             # 3. Prescription type → Other/s
@@ -170,7 +162,7 @@ async def fill_form(data: dict) -> dict:
             await safe_action("Where ER Adult", page.select_option("#ContentPlaceHolder1_WhereItHappen_Drop", value="3"))
             await asyncio.sleep(0.5)
             
-            # 7. Diagnosis (autocomplete)
+            # 7. Diagnosis
             try:
                 diagnosis_input = page.locator("#ContentPlaceHolder1_txtDiagnosis")
                 await diagnosis_input.click()
@@ -193,13 +185,13 @@ async def fill_form(data: dict) -> dict:
             await safe_action("Type Error select", page.select_option("#ContentPlaceHolder1_ddlNewTypeOfError", value=data['type_of_error']))
             await asyncio.sleep(0.5)
             await safe_action("Type Error Add", page.click("#ContentPlaceHolder1_NewTypeOfError_Main_Btn"))
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(2)
             
             # 10. Description
             await safe_action("Description", page.fill("#ContentPlaceHolder1_Event_Desc_Txt", data['description']))
             await asyncio.sleep(0.5)
             
-            # 11. Action Taken → Call physician
+            # 11. Action Taken
             await safe_action("Action Taken", page.select_option("#ContentPlaceHolder1_ActionTaken_Drop", value="3"))
             await asyncio.sleep(0.5)
             
@@ -221,18 +213,16 @@ async def fill_form(data: dict) -> dict:
                     await page.select_option("#ContentPlaceHolder1_Generic_Name_Drop", value=med_value)
                     await asyncio.sleep(0.5)
                     await page.click("#ContentPlaceHolder1_Add_Med")
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(2)
                     logger.info(f"✅ Medication added")
-                else:
-                    logger.warning("⚠️ Medication not found")
             except Exception as e:
                 logger.error(f"❌ Medication: {e}")
             
-            # 13. Factors → Lack of knowledge
+            # 13. Factors
             await safe_action("Factor select", page.select_option("#ContentPlaceHolder1_Factors_Drop", value="4"))
             await asyncio.sleep(0.5)
             await safe_action("Factor Add", page.click("#ContentPlaceHolder1_Factors_Main_Btn"))
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(2)
             
             # 14. Reporter Name
             await safe_action("Reporter Name", page.fill("#ContentPlaceHolder1_Reporter_Name_Txt", "Az"))
@@ -255,53 +245,36 @@ async def fill_form(data: dict) -> dict:
             await page.screenshot(path=screenshot_path, full_page=True)
             result["screenshot_path"] = screenshot_path
             
-            # 18. Submit
-            logger.info("Clicking Submit...")
-            await page.click("#ContentPlaceHolder1_Submit_Btn")
-            await asyncio.sleep(3)
-            logger.info("✅ Submit clicked")
+            # 18. Submit - الزر نفسه يتحول إلى Yes في modal
+            logger.info("Clicking Submit (opens modal)...")
+            try:
+                await page.click("#ContentPlaceHolder1_Submit_Btn", timeout=10000)
+                await asyncio.sleep(3)
+                logger.info("✅ Submit clicked - modal should open")
+            except Exception as e:
+                logger.error(f"Submit error: {e}")
             
-            # 19. التعامل مع Confirm dialog - Yes button
-            logger.info("Looking for Yes button in modal...")
+            # 19. Yes button في الـ modal
+            # الزر value="Yes" data-dismiss="modal"
+            logger.info("Clicking Yes in modal...")
             clicked_yes = False
             
-            # طريقة 1: بحث عن زر Yes داخل modal مرئي
             try:
-                yes_btn = page.locator(".modal.show button:has-text('Yes'), .modal[style*='display: block'] button:has-text('Yes')").first
-                await yes_btn.click(timeout=5000)
+                await page.click("input[value='Yes'][data-dismiss='modal']", timeout=5000)
                 clicked_yes = True
-                logger.info("✅ Yes clicked (modal show)")
+                logger.info("✅ Yes clicked (input value)")
             except Exception as e:
-                logger.warning(f"Method 1 failed: {e}")
+                logger.warning(f"Method 1: {e}")
             
-            # طريقة 2: أي زر يحتوي Yes
-            if not clicked_yes:
-                try:
-                    await page.get_by_role("button", name="Yes").click(timeout=5000)
-                    clicked_yes = True
-                    logger.info("✅ Yes clicked (role)")
-                except Exception as e:
-                    logger.warning(f"Method 2 failed: {e}")
-            
-            # طريقة 3: text selector
-            if not clicked_yes:
-                try:
-                    await page.click("text=Yes", timeout=5000)
-                    clicked_yes = True
-                    logger.info("✅ Yes clicked (text)")
-                except Exception as e:
-                    logger.warning(f"Method 3 failed: {e}")
-            
-            # طريقة 4: JavaScript مباشر
             if not clicked_yes:
                 try:
                     await page.evaluate("""
                         () => {
-                            const buttons = document.querySelectorAll('button, input[type="button"], input[type="submit"]');
-                            for (const btn of buttons) {
-                                const text = (btn.innerText || btn.value || '').trim();
-                                if (text === 'Yes') {
-                                    btn.click();
+                            const btns = document.querySelectorAll('input[value="Yes"], button');
+                            for (const b of btns) {
+                                if ((b.value === 'Yes' || b.innerText?.trim() === 'Yes') && 
+                                    b.offsetParent !== null) {
+                                    b.click();
                                     return true;
                                 }
                             }
@@ -309,18 +282,17 @@ async def fill_form(data: dict) -> dict:
                         }
                     """)
                     clicked_yes = True
-                    logger.info("✅ Yes clicked (JavaScript)")
+                    logger.info("✅ Yes clicked (JS)")
                 except Exception as e:
-                    logger.warning(f"Method 4 failed: {e}")
+                    logger.warning(f"Method 2: {e}")
             
-            await asyncio.sleep(7)
+            await asyncio.sleep(8)
             
             # Screenshot بعد Yes
             screenshot_after = "/tmp/form_after.png"
             await page.screenshot(path=screenshot_after, full_page=True)
             result["screenshot_after"] = screenshot_after
             
-            # تحقق من عنوان الصفحة أو URL للنجاح
             final_url = page.url
             logger.info(f"Final URL: {final_url}")
             result["final_url"] = final_url
@@ -330,7 +302,7 @@ async def fill_form(data: dict) -> dict:
             return result
             
         except Exception as e:
-            logger.error(f"Fatal error: {e}")
+            logger.error(f"Fatal: {e}")
             result["error"] = str(e)
             try:
                 screenshot_path = "/tmp/form_error.png"
@@ -348,15 +320,14 @@ async def fill_form(data: dict) -> dict:
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message.photo and not message.document:
-        await message.reply_text("أرسل صورة الوصفة مع الكلمة المفتاحية")
+        await message.reply_text("أرسل صورة مع caption")
         return
-    
     keyword = message.caption or ""
     if not keyword:
         await message.reply_text("⚠️ اكتب الكلمة المفتاحية")
         return
     
-    await message.reply_text("⏳ جاري المعالجة... (دقيقتين)")
+    await message.reply_text("⏳ جاري المعالجة...")
     
     if message.photo:
         file = await context.bot.get_file(message.photo[-1].file_id)
@@ -369,55 +340,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         extracted = extract_from_image(image_path)
-        
         if not extracted["mrn"] or not extracted["date"]:
-            await message.reply_text(f"⚠️ فشل قراءة البيانات")
+            await message.reply_text("⚠️ فشل قراءة البيانات")
             return
         
         case = get_case_details(keyword)
-        
-        full_data = {
-            "mrn": extracted["mrn"],
-            "date": extracted["date"],
-            "gender": extracted["gender"],
-            "diagnosis": extracted["diagnosis"],
-            "description": case["description"],
-            "medication_search": case["medication_search"],
-            "type_of_error": case["type_of_error"],
-        }
+        full_data = {**extracted, **case}
         
         await message.reply_text(
-            f"📋 البيانات:\n"
-            f"MRN: {full_data['mrn']}\n"
-            f"Date: {full_data['date']}\n"
-            f"Gender: {full_data['gender']}\n"
-            f"Diagnosis: {full_data['diagnosis']}\n\n"
-            f"جاري ملء النموذج..."
+            f"📋 {full_data['mrn']} | {full_data['date']} | {full_data['gender']}\n"
+            f"Dx: {full_data['diagnosis']}\n\n⏳ ملء النموذج..."
         )
         
         result = await fill_form(full_data)
         
         if result.get("screenshot_path") and os.path.exists(result["screenshot_path"]):
-            try:
-                with open(result["screenshot_path"], "rb") as f:
-                    await message.reply_photo(photo=f, caption="📸 قبل Submit")
-            except:
-                pass
+            with open(result["screenshot_path"], "rb") as f:
+                await message.reply_photo(photo=f, caption="📸 قبل Submit")
         
         if result.get("screenshot_after") and os.path.exists(result["screenshot_after"]):
-            try:
-                with open(result["screenshot_after"], "rb") as f:
-                    await message.reply_photo(photo=f, caption=f"📸 بعد Submit\nURL: {result.get('final_url', 'N/A')}")
-            except:
-                pass
+            with open(result["screenshot_after"], "rb") as f:
+                await message.reply_photo(photo=f, caption=f"📸 بعد Submit\n{result.get('final_url', '')}")
         
         if result["success"]:
-            await message.reply_text(f"Done ✔️\n\n✅ تحقق من الموقع")
+            await message.reply_text("Done ✔️ تحقق من الموقع")
         else:
-            await message.reply_text(f"⚠️ خطأ: {result.get('error', '')}")
-    
+            await message.reply_text(f"⚠️ {result.get('error', '')}")
     except Exception as e:
-        logger.error(f"Main error: {e}")
+        logger.error(f"Error: {e}")
         await message.reply_text(f"❌ {str(e)}")
     finally:
         try:
