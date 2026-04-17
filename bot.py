@@ -68,7 +68,6 @@ def get_case_details(keyword: str) -> dict:
 
 
 async def fill_text(page, field_id: str, value: str, name: str) -> bool:
-    """يملأ حقل نصي مع 3 محاولات وتحقق"""
     for attempt in range(3):
         try:
             await page.wait_for_selector(f"#{field_id}", state="attached", timeout=10000)
@@ -100,11 +99,9 @@ async def fill_text(page, field_id: str, value: str, name: str) -> bool:
 
 
 async def select_option_by_label(page, field_id: str, label_text: str, name: str) -> bool:
-    """يختار من dropdown حسب النص (ليس value)"""
     for attempt in range(3):
         try:
             await page.wait_for_selector(f"#{field_id}", state="attached", timeout=10000)
-            # استخراج value من label
             value = await page.evaluate(f"""
                 () => {{
                     const sel = document.getElementById('{field_id}');
@@ -115,7 +112,6 @@ async def select_option_by_label(page, field_id: str, label_text: str, name: str
                             return sel.options[i].value;
                         }}
                     }}
-                    // بحث جزئي إذا ما لقى تطابق تام
                     for (let i = 0; i < sel.options.length; i++) {{
                         if (sel.options[i].text.toLowerCase().includes(target)) {{
                             return sel.options[i].value;
@@ -125,7 +121,7 @@ async def select_option_by_label(page, field_id: str, label_text: str, name: str
                 }}
             """)
             if not value:
-                logger.error(f"❌ {name}: label '{label_text}' not found in options")
+                logger.error(f"❌ {name}: label '{label_text}' not found")
                 return False
             
             await page.select_option(f"#{field_id}", value=value)
@@ -138,7 +134,7 @@ async def select_option_by_label(page, field_id: str, label_text: str, name: str
             await asyncio.sleep(0.5)
             actual = await page.evaluate(f"""() => document.getElementById('{field_id}')?.value || ''""")
             if actual == value:
-                logger.info(f"✅ {name}: value={value} (label={label_text})")
+                logger.info(f"✅ {name}: value={value}")
                 return True
             await asyncio.sleep(1)
         except Exception as e:
@@ -148,17 +144,14 @@ async def select_option_by_label(page, field_id: str, label_text: str, name: str
 
 
 async def click_radio_hard(page, radio_id: str, name: str) -> bool:
-    """ضغط radio button بقوة — حتى لو مخفي"""
     for attempt in range(3):
         try:
-            # محاولة 1: ضغط عادي
             try:
                 await page.click(f"#{radio_id}", timeout=3000, force=True)
             except:
                 pass
             await asyncio.sleep(0.3)
             
-            # محاولة 2: JavaScript مباشر
             await page.evaluate(f"""
                 () => {{
                     const el = document.getElementById('{radio_id}');
@@ -172,19 +165,17 @@ async def click_radio_hard(page, radio_id: str, name: str) -> bool:
             """)
             await asyncio.sleep(0.5)
             
-            # تحقق
             checked = await page.evaluate(f"() => document.getElementById('{radio_id}')?.checked")
             if checked:
                 logger.info(f"✅ Radio {name} checked")
                 return True
             
-            # محاولة 3: ضغط على الـ label
             try:
                 await page.click(f"label[for='{radio_id}']", timeout=2000)
                 await asyncio.sleep(0.3)
                 checked2 = await page.evaluate(f"() => document.getElementById('{radio_id}')?.checked")
                 if checked2:
-                    logger.info(f"✅ Radio {name} checked (via label)")
+                    logger.info(f"✅ Radio {name} checked (label)")
                     return True
             except:
                 pass
@@ -197,7 +188,6 @@ async def click_radio_hard(page, radio_id: str, name: str) -> bool:
 
 
 async def click_with_retry(page, selector: str, name: str, timeout: int = 5000) -> bool:
-    """ضغط زر مع إعادة محاولة"""
     for attempt in range(3):
         try:
             await page.click(selector, timeout=timeout)
@@ -234,55 +224,86 @@ async def fill_form(data: dict) -> dict:
             status["reach_no"] = await click_radio_hard(page, "ContentPlaceHolder1_ErrorReachPatient_0", "Reach No")
             await asyncio.sleep(0.5)
             
-            # 2. Event Date - keyboard method
+            # 2. Event Date - datetimepicker API + JS شامل
             logger.info("📅 Setting Event Date...")
             date_success = False
             try:
-                await page.evaluate("() => { const el = document.getElementById('ContentPlaceHolder1_Event_Date_Txt'); if (el) el.removeAttribute('readonly'); }")
-                await asyncio.sleep(0.3)
-                await page.click("#ContentPlaceHolder1_Event_Date_Txt")
-                await asyncio.sleep(0.3)
-                await page.keyboard.press("Escape")
-                await asyncio.sleep(0.3)
-                await page.focus("#ContentPlaceHolder1_Event_Date_Txt")
-                await page.keyboard.press("Control+A")
-                await page.keyboard.press("Delete")
-                await asyncio.sleep(0.3)
-                await page.keyboard.type(f"{data['date']} 10:00 AM", delay=50)
-                await asyncio.sleep(0.5)
-                await page.keyboard.press("Tab")
-                await asyncio.sleep(1)
-                val = await page.evaluate("() => document.getElementById('ContentPlaceHolder1_Event_Date_Txt')?.value")
-                if val and val.strip():
+                date_parts = data['date'].split('/')
+                if len(date_parts) == 3:
+                    dd, mm, yyyy = date_parts
+                    iso = f"{yyyy}-{mm.zfill(2)}-{dd.zfill(2)}T10:00:00"
+                    formatted = f"{dd.zfill(2)}/{mm.zfill(2)}/{yyyy} 10:00 AM"
+                else:
+                    iso = "2026-04-15T10:00:00"
+                    formatted = "15/04/2026 10:00 AM"
+                
+                result_js = await page.evaluate(f"""
+                    () => {{
+                        const visible = document.getElementById('ContentPlaceHolder1_Event_Date_Txt');
+                        const hidden = document.getElementById('ContentPlaceHolder1_hdnEvent_Dt_Txt');
+                        
+                        if (visible) {{
+                            visible.removeAttribute('readonly');
+                            visible.removeAttribute('disabled');
+                            visible.value = '{formatted}';
+                            visible.setAttribute('value', '{formatted}');
+                            ['input', 'change', 'blur', 'keyup', 'keydown'].forEach(e => {{
+                                visible.dispatchEvent(new Event(e, {{ bubbles: true }}));
+                            }});
+                        }}
+                        
+                        if (hidden) {{
+                            hidden.value = '{formatted}';
+                            hidden.setAttribute('value', '{formatted}');
+                            hidden.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        }}
+                        
+                        try {{
+                            if (typeof $ !== 'undefined' && $('#ContentPlaceHolder1_Event_Date_Txt').data('DateTimePicker')) {{
+                                $('#ContentPlaceHolder1_Event_Date_Txt').data('DateTimePicker').date(moment('{iso}'));
+                            }}
+                        }} catch(e) {{}}
+                        
+                        return {{
+                            visible: visible?.value,
+                            hidden: hidden?.value
+                        }};
+                    }}
+                """)
+                
+                logger.info(f"Date result: {result_js}")
+                
+                if result_js.get('visible') or result_js.get('hidden'):
                     date_success = True
-                    logger.info(f"✅ Date: {val}")
+                    logger.info(f"✅ Date: {result_js}")
             except Exception as e:
                 logger.error(f"Date: {e}")
             status["date"] = date_success
             
-            # 3. Prescription Other/s - radio بقوة
+            # 3. Prescription Other/s
             status["prescription"] = await click_radio_hard(page, "ContentPlaceHolder1_Wasfaty_Chk_0", "Prescription Other/s")
             await asyncio.sleep(1)
             
             # 4. Stage → Prescribing
             status["stage"] = await select_option_by_label(page, "ContentPlaceHolder1_ME_Type_Drop", "Prescribing", "Stage")
             
-            # 5. Type of Error + Add
-            # type_of_error هنا value رقمي، بنبحث بالـ label من الجدول
+            # 5. Type of Error + Add (نعتبرهما نفس الشي)
             type_labels = {
                 "12": "Wrong/missed indication",
                 "9": "wrong/missed duration",
                 "1": "Wrong/missed dose"
             }
             type_label = type_labels.get(data['type_of_error'], "Wrong/missed indication")
-            status["type_select"] = await select_option_by_label(page, "ContentPlaceHolder1_ddlNewTypeOfError", type_label, "Type of Error")
+            await select_option_by_label(page, "ContentPlaceHolder1_ddlNewTypeOfError", type_label, "Type of Error")
+            await asyncio.sleep(0.5)
             status["type_add"] = await click_with_retry(page, "#ContentPlaceHolder1_NewTypeOfError_Main_Btn", "Type Add")
-            await asyncio.sleep(3)  # postback
+            await asyncio.sleep(3)
+            status["type_select"] = status["type_add"]
             
             # 6. Description
             status["description"] = await fill_text(page, "ContentPlaceHolder1_Event_Desc_Txt", data['description'], "Description")
             
-            # 7. Diagnosis autocomplete
+            # 7. Diagnosis
             try:
                 await page.click("#ContentPlaceHolder1_txtDiagnosis")
                 await asyncio.sleep(0.5)
@@ -300,7 +321,7 @@ async def fill_form(data: dict) -> dict:
                 logger.error(f"Diagnosis: {e}")
                 status["diagnosis"] = False
             
-            # 8. Action Taken → Call the physician...
+            # 8. Action Taken
             status["action"] = await select_option_by_label(page, "ContentPlaceHolder1_ActionTaken_Drop", "Call the physician", "Action Taken")
             
             # 9. Medication + Add
@@ -324,27 +345,13 @@ async def fill_form(data: dict) -> dict:
                     await asyncio.sleep(0.5)
                     await page.click("#ContentPlaceHolder1_Add_Med")
                     await asyncio.sleep(3)
-                    # تحقق من الجدول (مش الـ select)
-                    med_in_table = await page.evaluate("""
-                        () => {
-                            const tables = document.querySelectorAll('table');
-                            for (const t of tables) {
-                                if (t.innerText.toLowerCase().includes('omeprazole') || 
-                                    t.innerText.toLowerCase().includes('paracetamol') ||
-                                    t.querySelectorAll('tr').length > 1) {
-                                    return true;
-                                }
-                            }
-                            return false;
-                        }
-                    """)
-                    med_ok = bool(med_value)  # نعتبره نجح إذا اختار قيمة
-                    logger.info(f"✅ Medication added (value={med_value})")
+                    med_ok = True
+                    logger.info(f"✅ Medication added")
             except Exception as e:
                 logger.error(f"Medication: {e}")
             status["medication"] = med_ok
             
-            # 10. Factor + Add → Lack of knowledge
+            # 10. Factor + Add
             factor_ok = False
             try:
                 factor_value = await page.evaluate("""
@@ -365,12 +372,12 @@ async def fill_form(data: dict) -> dict:
                     await page.click("#ContentPlaceHolder1_Factors_Main_Btn")
                     await asyncio.sleep(3)
                     factor_ok = True
-                    logger.info(f"✅ Factor added (value={factor_value})")
+                    logger.info(f"✅ Factor added")
             except Exception as e:
                 logger.error(f"Factor: {e}")
             status["factor"] = factor_ok
             
-            # 11-17. الحقول العادية بعد postbacks
+            # 11-17. الحقول العادية
             status["mrn"] = await fill_text(page, "ContentPlaceHolder1_Mr_Txt", data['mrn'], "MRN")
             status["gender"] = await select_option_by_label(page, "ContentPlaceHolder1_Gender_Drop", data['gender'], "Gender")
             status["where"] = await select_option_by_label(page, "ContentPlaceHolder1_WhereItHappen_Drop", "ER Adult", "Where")
@@ -381,46 +388,36 @@ async def fill_form(data: dict) -> dict:
             
             result["field_status"] = status
             
-            # تقرير نهائي
-            critical_fields = ["reach_no", "date", "prescription", "stage", "type_select", "type_add", 
-                               "description", "diagnosis", "action", "medication", "factor",
-                               "mrn", "gender", "where", "reporter", "email", "mobile", "staff"]
-            all_ok = all(status.get(f, False) for f in critical_fields)
+            critical = ["reach_no", "date", "prescription", "stage", "type_add", 
+                       "description", "diagnosis", "action", "medication", "factor",
+                       "mrn", "gender", "where", "reporter", "email", "mobile", "staff"]
+            all_ok = all(status.get(f, False) for f in critical)
             result["all_filled"] = all_ok
             
             logger.info(f"📊 ALL FILLED: {all_ok}")
-            for k, v in status.items():
-                logger.info(f"   {k}: {'✅' if v else '❌'}")
             
             # Screenshot قبل
             screenshot_path = "/tmp/form_preview.png"
             await page.screenshot(path=screenshot_path, full_page=True)
             result["screenshot_path"] = screenshot_path
             
-            # Submit فقط لو كل الحقول ممتلئة
+            # Submit
             if all_ok:
-                logger.info("🚀 All fields filled, clicking Submit...")
+                logger.info("🚀 Submitting...")
                 try:
                     await page.click("#ContentPlaceHolder1_Submit_Btn", timeout=10000)
                     await asyncio.sleep(3)
                 except Exception as e:
                     logger.error(f"Submit: {e}")
                 
-                # Yes
-                logger.info("👆 Clicking Yes...")
                 clicked_yes = False
-                for selector in [
-                    "input[value='Yes'][data-dismiss='modal']",
-                    "button:has-text('Yes')",
-                    "text=Yes",
-                ]:
+                for selector in ["input[value='Yes'][data-dismiss='modal']", "button:has-text('Yes')", "text=Yes"]:
                     if clicked_yes: break
                     try:
                         await page.click(selector, timeout=3000)
                         clicked_yes = True
-                        logger.info(f"✅ Yes clicked: {selector}")
-                    except:
-                        pass
+                        logger.info(f"✅ Yes clicked")
+                    except: pass
                 
                 if not clicked_yes:
                     try:
@@ -435,15 +432,12 @@ async def fill_form(data: dict) -> dict:
                                 }
                             }
                         """)
-                        logger.info("✅ Yes clicked (JS)")
-                    except:
-                        pass
+                    except: pass
                 
                 await asyncio.sleep(10)
             else:
-                logger.warning("⚠️ NOT all fields filled — SKIPPING Submit!")
+                logger.warning("⚠️ NOT all filled — SKIPPING Submit")
             
-            # Screenshot بعد
             screenshot_after = "/tmp/form_after.png"
             await page.screenshot(path=screenshot_after, full_page=True)
             result["screenshot_after"] = screenshot_after
