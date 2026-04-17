@@ -99,23 +99,15 @@ async def fill_text(page, field_id: str, value: str, name: str) -> bool:
 
 
 async def fill_text_by_name(page, field_name: str, value: str, name: str) -> bool:
-    """يملأ حقل باستخدام اسم (name attribute) بدل id"""
     for attempt in range(3):
         try:
-            # نبحث بأي طريقة: id, name, أو partial match
             filled = await page.evaluate(f"""
                 () => {{
-                    // محاولة 1: id مباشر
                     let el = document.getElementById('{field_name}');
                     if (!el) el = document.getElementById('ContentPlaceHolder1_{field_name}');
-                    if (!el) el = document.getElementById('ContentPlaceHolder1_{field_name.capitalize()}');
-                    if (!el) el = document.getElementById('ContentPlaceHolder1_{field_name}_Txt');
-                    
-                    // محاولة 2: name attribute
                     if (!el) el = document.querySelector(`[name="{field_name}"]`);
                     if (!el) el = document.querySelector(`[name*="{field_name}" i]`);
                     
-                    // محاولة 3: id يحتوي على النص
                     if (!el) {{
                         const all = document.querySelectorAll('input[type="text"], textarea');
                         for (const i of all) {{
@@ -145,7 +137,6 @@ async def fill_text_by_name(page, field_name: str, value: str, name: str) -> boo
         except Exception as e:
             logger.error(f"Attempt {attempt+1} {name}: {e}")
             await asyncio.sleep(1)
-    logger.error(f"❌ {name} FAILED")
     return False
 
 
@@ -271,7 +262,7 @@ async def fill_form(data: dict) -> dict:
             
             status = {}
             
-            # 1. Reach Patient → No (الـ _1 هو No)
+            # 1. Reach Patient → No
             status["reach_no"] = await click_radio_hard(page, "ContentPlaceHolder1_ErrorReachPatient_1", "Reach No")
             await asyncio.sleep(0.5)
             
@@ -331,11 +322,9 @@ async def fill_form(data: dict) -> dict:
                 logger.error(f"Date: {e}")
             status["date"] = date_success
             
-            # 3. Prescription Other/s + نكتب ER في الحقل الجانبي
+            # 3. Prescription Other/s + ER
             status["prescription"] = await click_radio_hard(page, "ContentPlaceHolder1_Wasfaty_Chk_0", "Prescription Other/s")
             await asyncio.sleep(2)
-            
-            # نكتب ER في حقل other
             status["other_er"] = await fill_text_by_name(page, "other", "ER", "Other ER")
             await asyncio.sleep(0.5)
             
@@ -432,14 +421,60 @@ async def fill_form(data: dict) -> dict:
                 logger.error(f"Factor: {e}")
             status["factor"] = factor_ok
             
-            # 11-17. الحقول العادية
-            status["mrn"] = await fill_text(page, "ContentPlaceHolder1_Mr_Txt", data['mrn'], "MRN")
-            status["gender"] = await select_option_by_label(page, "ContentPlaceHolder1_Gender_Drop", data['gender'], "Gender")
-            status["where"] = await select_option_by_label(page, "ContentPlaceHolder1_WhereItHappen_Drop", "ER Adult", "Where")
-            status["reporter"] = await fill_text(page, "ContentPlaceHolder1_Reporter_Name_Txt", "Az", "Reporter")
-            status["email"] = await fill_text(page, "ContentPlaceHolder1_Reporter_Email_Txt", "aalhazmi50@moh.gov.sa", "Email")
-            status["mobile"] = await fill_text(page, "ContentPlaceHolder1_Reporter_Mobile_Txt", "0547995498", "Mobile")
-            status["staff"] = await select_option_by_label(page, "ContentPlaceHolder1_Staff_Cat_Drop", "Pharmacist", "Staff")
+            # 11-17. الحقول العادية - 3 جولات لضمان الحفظ
+            for round_num in range(3):
+                logger.info(f"🔄 Round {round_num + 1}/3 for simple fields")
+                
+                await fill_text(page, "ContentPlaceHolder1_Mr_Txt", data['mrn'], f"MRN r{round_num+1}")
+                await select_option_by_label(page, "ContentPlaceHolder1_Gender_Drop", data['gender'], f"Gender r{round_num+1}")
+                await select_option_by_label(page, "ContentPlaceHolder1_WhereItHappen_Drop", "ER Adult", f"Where r{round_num+1}")
+                await fill_text(page, "ContentPlaceHolder1_Reporter_Name_Txt", "Az", f"Reporter r{round_num+1}")
+                await fill_text(page, "ContentPlaceHolder1_Reporter_Email_Txt", "aalhazmi50@moh.gov.sa", f"Email r{round_num+1}")
+                await fill_text(page, "ContentPlaceHolder1_Reporter_Mobile_Txt", "0547995498", f"Mobile r{round_num+1}")
+                await select_option_by_label(page, "ContentPlaceHolder1_Staff_Cat_Drop", "Pharmacist", f"Staff r{round_num+1}")
+                
+                await asyncio.sleep(1)
+            
+            # تحقق نهائي بقراءة مباشرة من الصفحة
+            logger.info("🔍 Final verification from live page...")
+            final_check = await page.evaluate("""
+                () => {
+                    return {
+                        mrn: document.getElementById('ContentPlaceHolder1_Mr_Txt')?.value || '',
+                        date: document.getElementById('ContentPlaceHolder1_Event_Date_Txt')?.value || '',
+                        gender: document.getElementById('ContentPlaceHolder1_Gender_Drop')?.value || '',
+                        where: document.getElementById('ContentPlaceHolder1_WhereItHappen_Drop')?.value || '',
+                        diagnosis: document.getElementById('ContentPlaceHolder1_txtDiagnosis')?.value || '',
+                        description: document.getElementById('ContentPlaceHolder1_Event_Desc_Txt')?.value || '',
+                        reporter: document.getElementById('ContentPlaceHolder1_Reporter_Name_Txt')?.value || '',
+                        email: document.getElementById('ContentPlaceHolder1_Reporter_Email_Txt')?.value || '',
+                        mobile: document.getElementById('ContentPlaceHolder1_Reporter_Mobile_Txt')?.value || '',
+                        stage: document.getElementById('ContentPlaceHolder1_ME_Type_Drop')?.value || '',
+                        action: document.getElementById('ContentPlaceHolder1_ActionTaken_Drop')?.value || '',
+                        staff: document.getElementById('ContentPlaceHolder1_Staff_Cat_Drop')?.value || '',
+                        reach_no: document.getElementById('ContentPlaceHolder1_ErrorReachPatient_1')?.checked || false,
+                        wasfaty_other: document.getElementById('ContentPlaceHolder1_Wasfaty_Chk_0')?.checked || false
+                    };
+                }
+            """)
+            
+            logger.info(f"🔍 FINAL VALUES: {final_check}")
+            
+            # تحديث status بناءً على القيم الفعلية
+            status["mrn"] = bool(str(final_check.get('mrn', '')).strip())
+            status["date"] = bool(str(final_check.get('date', '')).strip())
+            status["gender"] = bool(str(final_check.get('gender', '')).strip() and str(final_check.get('gender', '')) != '')
+            status["where"] = bool(str(final_check.get('where', '')).strip() and str(final_check.get('where', '')) != '')
+            status["diagnosis"] = bool(str(final_check.get('diagnosis', '')).strip())
+            status["description"] = bool(str(final_check.get('description', '')).strip())
+            status["reporter"] = bool(str(final_check.get('reporter', '')).strip())
+            status["email"] = bool(str(final_check.get('email', '')).strip())
+            status["mobile"] = bool(str(final_check.get('mobile', '')).strip())
+            status["stage"] = bool(str(final_check.get('stage', '')).strip() and str(final_check.get('stage', '')) != '')
+            status["action"] = bool(str(final_check.get('action', '')).strip() and str(final_check.get('action', '')) != '')
+            status["staff"] = bool(str(final_check.get('staff', '')).strip() and str(final_check.get('staff', '')) != '')
+            status["reach_no"] = final_check.get('reach_no', False)
+            status["prescription"] = final_check.get('wasfaty_other', False)
             
             result["field_status"] = status
             
@@ -456,7 +491,7 @@ async def fill_form(data: dict) -> dict:
             await page.screenshot(path=screenshot_path, full_page=True)
             result["screenshot_path"] = screenshot_path
             
-            # Submit
+            # Submit فقط لو كل الحقول ممتلئة فعلاً
             if all_ok:
                 logger.info("🚀 Submitting...")
                 try:
@@ -503,7 +538,7 @@ async def fill_form(data: dict) -> dict:
                 logger.info(f"Yes click result: {yes_clicked}")
                 await asyncio.sleep(10)
             else:
-                logger.warning("⚠️ NOT all filled — SKIPPING Submit")
+                logger.warning("⚠️ NOT all filled (verified from live) — SKIPPING Submit")
             
             screenshot_after = "/tmp/form_after.png"
             await page.screenshot(path=screenshot_after, full_page=True)
@@ -536,7 +571,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("⚠️ اكتب الكلمة المفتاحية")
         return
     
-    await message.reply_text("⏳ جاري المعالجة... (2-3 دقائق)")
+    await message.reply_text("⏳ جاري المعالجة... (3-4 دقائق)")
     
     if message.photo:
         file = await context.bot.get_file(message.photo[-1].file_id)
@@ -558,19 +593,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await message.reply_text(
             f"📋 {full_data['mrn']} | {full_data['date']} | {full_data['gender']}\n"
-            f"Dx: {full_data['diagnosis']}\n\n⏳ ملء النموذج..."
+            f"Dx: {full_data['diagnosis']}\n\n⏳ ملء النموذج (3 جولات)..."
         )
         
         result = await fill_form(full_data)
         
         if result.get("field_status"):
             status = result["field_status"]
-            report = "📊 تقرير الحقول:\n"
+            report = "📊 تقرير الحقول (من الموقع الحقيقي):\n"
             for k, v in status.items():
                 report += f"{'✅' if v else '❌'} {k}\n"
             
             if result.get("all_filled"):
-                report += "\n✅ الكل ممتلئ — تم الإرسال"
+                report += "\n✅ الكل ممتلئ فعلاً — تم الإرسال"
             else:
                 report += "\n⚠️ بعض الحقول فاضية — لم يتم الإرسال"
             
