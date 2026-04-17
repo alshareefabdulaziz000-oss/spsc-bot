@@ -26,43 +26,61 @@ genai.configure(api_key=GEMINI_API_KEY)
 FORM_URL = "https://portal.spsc.gov.sa/MEH/Default.aspx?Id=454"
 
 
-def extract_from_image(image_path: str) -> dict:
+def extract_from_image(image_path: str, keyword: str = "") -> dict:
     model = genai.GenerativeModel("gemini-flash-latest")
     with open(image_path, "rb") as f:
         image_data = f.read()
-    prompt = """من صورة الوصفة الطبية استخرج:
+    
+    k = keyword.lower().strip()
+    
+    if k == "3 days":
+        med_instruction = "MEDICATION: اسم دواء واحد فقط من الوصفة مكتوب لمدة أكثر من 3 أيام (4 أيام أو 5 أيام أو 7 أيام أو أسبوع). اكتب الاسم العام فقط (مثل: omeprazole أو paracetamol)"
+    elif k == "no diagnosis":
+        med_instruction = "MEDICATION: اسم دواء واحد فقط من الوصفة (أي دواء موجود). اكتب الاسم العام فقط"
+    else:
+        med_instruction = "MEDICATION: omeprazole"
+    
+    prompt = f"""من صورة الوصفة الطبية استخرج:
 1. MRN: رقم المريض
 2. DATE: (DD/MM/YYYY)
 3. GENDER: Male أو Female
 4. DIAGNOSIS: من Indication (EMPTY إذا فاضي)
+5. {med_instruction}
 
 أجب:
 MRN: xxxxx
 DATE: DD/MM/YYYY
 GENDER: Male
-DIAGNOSIS: xxxxx"""
+DIAGNOSIS: xxxxx
+MEDICATION: xxxxx"""
+    
     response = model.generate_content([prompt, {"mime_type": "image/jpeg", "data": image_data}])
     text = response.text.strip()
-    result = {"mrn": "", "date": "", "gender": "Male", "diagnosis": ""}
+    result = {"mrn": "", "date": "", "gender": "Male", "diagnosis": "", "medication": ""}
     for line in text.split("\n"):
         line = line.strip()
         if line.startswith("MRN:"): result["mrn"] = line.split("MRN:")[1].strip()
         elif line.startswith("DATE:"): result["date"] = line.split("DATE:")[1].strip()
         elif line.startswith("GENDER:"): result["gender"] = line.split("GENDER:")[1].strip()
         elif line.startswith("DIAGNOSIS:"): result["diagnosis"] = line.split("DIAGNOSIS:")[1].strip()
+        elif line.startswith("MEDICATION:"): result["medication"] = line.split("MEDICATION:")[1].strip()
     if not result["diagnosis"] or result["diagnosis"].upper() == "EMPTY":
         result["diagnosis"] = "headache"
+    if not result["medication"] or result["medication"].upper() == "EMPTY":
+        result["medication"] = "paracetamol"
     return result
 
 
-def get_case_details(keyword: str) -> dict:
+def get_case_details(keyword: str, extracted_medication: str = "") -> dict:
     k = keyword.lower().strip()
     if k == "omeprazole":
         return {"description": "Doctor write medicine out of privilege", "medication_search": "omeprazole", "type_of_error": "12"}
     elif k == "3 days":
-        return {"description": "Doctor wrote medicine more than 3 days", "medication_search": "paracetamol", "type_of_error": "9"}
+        med = extracted_medication if extracted_medication else "paracetamol"
+        return {"description": "Doctor wrote medicine more than 3 days", "medication_search": med, "type_of_error": "9"}
     elif k == "no diagnosis":
-        return {"description": "Didn't write the diagnosis", "medication_search": "paracetamol", "type_of_error": "12"}
+        med = extracted_medication if extracted_medication else "paracetamol"
+        return {"description": "Didn't write the diagnosis", "medication_search": med, "type_of_error": "12"}
     else:
         return {"description": keyword, "medication_search": keyword, "type_of_error": "1"}
 
@@ -296,12 +314,10 @@ async def fill_form(data: dict) -> dict:
             await page.goto(FORM_URL, wait_until="networkidle", timeout=120000)
             await asyncio.sleep(5)
             
-            # Round 1
             logger.info("========== ROUND 1 ==========")
             await fill_all_simple_fields(page, data)
             await asyncio.sleep(2)
             
-            # Type + Add
             logger.info("========== Type + Add ==========")
             type_labels = {"12": "Wrong/missed indication", "9": "wrong/missed duration", "1": "Wrong/missed dose"}
             type_label = type_labels.get(data['type_of_error'], "Wrong/missed indication")
@@ -313,12 +329,10 @@ async def fill_form(data: dict) -> dict:
             except Exception as e:
                 logger.error(f"Type Add: {e}")
             
-            # Round 2
             logger.info("========== ROUND 2 ==========")
             await fill_all_simple_fields(page, data)
             await asyncio.sleep(2)
             
-            # Medication + Add
             logger.info("========== Medication + Add ==========")
             try:
                 med_value = await page.evaluate(f"""
@@ -340,12 +354,10 @@ async def fill_form(data: dict) -> dict:
             except Exception as e:
                 logger.error(f"Medication: {e}")
             
-            # Round 3
             logger.info("========== ROUND 3 ==========")
             await fill_all_simple_fields(page, data)
             await asyncio.sleep(2)
             
-            # Factor + Add
             logger.info("========== Factor + Add ==========")
             try:
                 factor_value = await page.evaluate("""
@@ -366,12 +378,10 @@ async def fill_form(data: dict) -> dict:
             except Exception as e:
                 logger.error(f"Factor: {e}")
             
-            # Round 4 FINAL
             logger.info("========== ROUND 4 FINAL ==========")
             await fill_all_simple_fields(page, data)
             await asyncio.sleep(3)
             
-            # تحقق نهائي
             final_check = await page.evaluate("""
                 () => ({
                     mrn: document.getElementById('ContentPlaceHolder1_Mr_Txt')?.value || '',
@@ -415,11 +425,8 @@ async def fill_form(data: dict) -> dict:
             all_ok = all(status.get(f, False) for f in critical)
             result["all_filled"] = all_ok
             
-            # Submit
             if all_ok:
                 logger.info("🚀 Starting Submit sequence...")
-                
-                # التمرير إلى Submit
                 await page.evaluate("""
                     () => {
                         const btn = document.getElementById('ContentPlaceHolder1_Submit_Btn');
@@ -428,18 +435,15 @@ async def fill_form(data: dict) -> dict:
                 """)
                 await asyncio.sleep(2)
                 
-                # Screenshot قبل Submit
                 await page.screenshot(path="/tmp/before_submit.png", full_page=True)
                 result["before_submit"] = "/tmp/before_submit.png"
                 
-                # اضغط Submit
                 submit_clicked = False
                 try:
                     await page.click("#ContentPlaceHolder1_Submit_Btn", timeout=15000, force=True)
                     submit_clicked = True
-                    logger.info("✅ Submit clicked (Playwright)")
                 except Exception as e:
-                    logger.error(f"Submit Playwright: {e}")
+                    logger.error(f"Submit: {e}")
                 
                 if not submit_clicked:
                     try:
@@ -451,20 +455,14 @@ async def fill_form(data: dict) -> dict:
                             }
                         """)
                         submit_clicked = True
-                        logger.info("✅ Submit clicked (JS)")
-                    except Exception as e:
-                        logger.error(f"Submit JS: {e}")
+                    except: pass
                 
                 result["submit_clicked"] = submit_clicked
-                
-                # ننتظر الـ modal
                 await asyncio.sleep(5)
                 
-                # Screenshot بعد Submit
                 await page.screenshot(path="/tmp/after_submit.png", full_page=True)
                 result["after_submit"] = "/tmp/after_submit.png"
                 
-                # فحص Modal
                 modal_visible = await page.evaluate("""
                     () => {
                         const modals = document.querySelectorAll('.modal, [role="dialog"]');
@@ -472,68 +470,41 @@ async def fill_form(data: dict) -> dict:
                         for (const m of modals) {
                             const style = window.getComputedStyle(m);
                             if (style.display !== 'none' && m.offsetParent !== null) {
-                                visible.push({
-                                    id: m.id,
-                                    classes: m.className,
-                                    text: m.innerText.substring(0, 200)
-                                });
+                                visible.push({id: m.id, classes: m.className, text: m.innerText.substring(0, 200)});
                             }
                         }
                         return visible;
                     }
                 """)
-                logger.info(f"🔍 Visible modals: {modal_visible}")
                 result["modal_info"] = str(modal_visible)
                 
-                # Yes - 5 محاولات
                 yes_success = False
                 for yes_attempt in range(5):
-                    logger.info(f"👆 Yes attempt {yes_attempt+1}/5...")
-                    
                     yes_result = await page.evaluate("""
                         () => {
                             const allButtons = document.querySelectorAll('input[type="button"], input[type="submit"], button, a');
-                            const found = [];
-                            
                             for (const b of allButtons) {
                                 const text = (b.value || b.innerText || '').trim();
                                 const visible = b.offsetParent !== null;
-                                
                                 if (visible && text === 'Yes') {
                                     b.click();
-                                    return {clicked: true, id: b.id, value: b.value, text: text};
-                                }
-                                
-                                if (visible && text.includes('Yes')) {
-                                    found.push({id: b.id, value: b.value, text: text});
+                                    return {clicked: true};
                                 }
                             }
-                            
-                            return {clicked: false, found: found};
+                            return {clicked: false};
                         }
                     """)
-                    
-                    logger.info(f"Yes result: {yes_result}")
-                    
                     if yes_result.get('clicked'):
                         yes_success = True
-                        logger.info("✅ Yes clicked!")
                         break
-                    
                     await asyncio.sleep(2)
                 
                 result["yes_success"] = yes_success
-                
-                # انتظر الحفظ
                 await asyncio.sleep(15)
                 
-                # Screenshot بعد Yes
                 await page.screenshot(path="/tmp/after_yes.png", full_page=True)
                 result["after_yes"] = "/tmp/after_yes.png"
-                
-                logger.info(f"Submit: {submit_clicked}, Yes: {yes_success}")
             else:
-                # Screenshot حتى لو ما كمل
                 await page.screenshot(path="/tmp/before_submit.png", full_page=True)
                 result["before_submit"] = "/tmp/before_submit.png"
             
@@ -564,9 +535,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("⚠️ اكتب الكلمة المفتاحية")
         return
     
-    await message.reply_text("⏳ جاري المعالجة... (5-7 دقائق، خذ فنجان قهوة ☕)")
+    await message.reply_text("⏳ جاري المعالجة... (5-7 دقائق ☕)")
     
-    # Heartbeat
     heartbeat_running = True
     async def heartbeat():
         while heartbeat_running:
@@ -587,40 +557,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         image_path = tmp.name
     
     try:
-        extracted = extract_from_image(image_path)
+        extracted = extract_from_image(image_path, keyword)
         if not extracted["mrn"] or not extracted["date"]:
             await message.reply_text("⚠️ فشل قراءة البيانات")
             return
         
-        case = get_case_details(keyword)
+        case = get_case_details(keyword, extracted.get("medication", ""))
         full_data = {**extracted, **case}
         
         await message.reply_text(
             f"📋 {full_data['mrn']} | {full_data['date']} | {full_data['gender']}\n"
-            f"Dx: {full_data['diagnosis']}\n\n⏳ ملء النموذج..."
+            f"Dx: {full_data['diagnosis']}\n"
+            f"💊 {full_data['medication_search']}\n\n⏳ ملء النموذج..."
         )
         
         result = await fill_form(full_data)
         
-        # تقرير الحقول
         if result.get("field_status"):
             status = result["field_status"]
-            report = "📊 تقرير من الموقع الحقيقي:\n"
+            report = "📊 تقرير:\n"
             for k, v in status.items():
                 report += f"{'✅' if v else '❌'} {k}\n"
-            
             if result.get("all_filled"):
                 report += "\n✅ الكل ممتلئ"
             else:
                 report += "\n⚠️ بعض الحقول فاضية"
-            
             await message.reply_text(report)
         
-        # Screenshots التشخيصية
         screenshots = [
             ("before_submit", "📸 1. قبل Submit"),
-            ("after_submit", "📸 2. بعد Submit (هل modal ظهر؟)"),
-            ("after_yes", "📸 3. بعد Yes (هل صفحة النجاح؟)"),
+            ("after_submit", "📸 2. بعد Submit"),
+            ("after_yes", "📸 3. بعد Yes"),
         ]
         
         for key, caption in screenshots:
@@ -632,14 +599,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     logger.error(f"Send {key}: {e}")
         
-        # تقرير تشخيصي
         diag = f"🔍 Submit: {'✅' if result.get('submit_clicked') else '❌'}\n"
         diag += f"🔍 Yes: {'✅' if result.get('yes_success') else '❌'}\n"
-        diag += f"🔍 URL: {result.get('final_url', 'N/A')}\n\n"
-        modal = result.get('modal_info', 'N/A')
-        if len(modal) > 300:
-            modal = modal[:300] + "..."
-        diag += f"🔍 Modals: {modal}"
+        diag += f"🔍 URL: {result.get('final_url', 'N/A')}"
         await message.reply_text(diag)
         
         if result["success"] and result.get("all_filled") and result.get("yes_success"):
