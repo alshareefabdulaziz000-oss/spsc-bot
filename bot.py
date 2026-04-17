@@ -224,7 +224,7 @@ async def fill_form(data: dict) -> dict:
             status["reach_no"] = await click_radio_hard(page, "ContentPlaceHolder1_ErrorReachPatient_0", "Reach No")
             await asyncio.sleep(0.5)
             
-            # 2. Event Date - datetimepicker API + JS شامل
+            # 2. Event Date
             logger.info("📅 Setting Event Date...")
             date_success = False
             try:
@@ -284,10 +284,10 @@ async def fill_form(data: dict) -> dict:
             status["prescription"] = await click_radio_hard(page, "ContentPlaceHolder1_Wasfaty_Chk_0", "Prescription Other/s")
             await asyncio.sleep(1)
             
-            # 4. Stage → Prescribing
+            # 4. Stage
             status["stage"] = await select_option_by_label(page, "ContentPlaceHolder1_ME_Type_Drop", "Prescribing", "Stage")
             
-            # 5. Type of Error + Add (نعتبرهما نفس الشي)
+            # 5. Type of Error + Add
             type_labels = {
                 "12": "Wrong/missed indication",
                 "9": "wrong/missed duration",
@@ -406,34 +406,46 @@ async def fill_form(data: dict) -> dict:
                 logger.info("🚀 Submitting...")
                 try:
                     await page.click("#ContentPlaceHolder1_Submit_Btn", timeout=10000)
-                    await asyncio.sleep(3)
+                    logger.info("✅ Submit clicked — waiting for modal...")
+                    await asyncio.sleep(4)
                 except Exception as e:
                     logger.error(f"Submit: {e}")
                 
-                clicked_yes = False
-                for selector in ["input[value='Yes'][data-dismiss='modal']", "button:has-text('Yes')", "text=Yes"]:
-                    if clicked_yes: break
-                    try:
-                        await page.click(selector, timeout=3000)
-                        clicked_yes = True
-                        logger.info(f"✅ Yes clicked")
-                    except: pass
-                
-                if not clicked_yes:
-                    try:
-                        await page.evaluate("""
-                            () => {
-                                const btns = document.querySelectorAll('input[value="Yes"], button');
-                                for (const b of btns) {
-                                    if ((b.value === 'Yes' || b.innerText?.trim() === 'Yes') && b.offsetParent !== null) {
-                                        b.click();
-                                        return true;
-                                    }
-                                }
+                # Yes button — JavaScript مباشرة
+                logger.info("👆 Clicking Yes via JS...")
+                yes_clicked = await page.evaluate("""
+                    () => {
+                        const selectors = [
+                            'input[value="Yes"][data-dismiss="modal"]',
+                            '.modal.show input[value="Yes"]',
+                            '.modal.in input[value="Yes"]',
+                            '.modal[style*="display: block"] input[value="Yes"]',
+                            '.modal.show button',
+                            '.modal[style*="display: block"] button'
+                        ];
+                        
+                        for (const sel of selectors) {
+                            const el = document.querySelector(sel);
+                            if (el && (el.value === 'Yes' || el.innerText?.trim() === 'Yes')) {
+                                el.click();
+                                return 'clicked: ' + sel;
                             }
-                        """)
-                    except: pass
+                        }
+                        
+                        const all = document.querySelectorAll('input[type="button"], button');
+                        for (const b of all) {
+                            const text = b.value || b.innerText || '';
+                            if (text.trim() === 'Yes' && b.offsetParent !== null) {
+                                b.click();
+                                return 'clicked: generic';
+                            }
+                        }
+                        
+                        return 'not found';
+                    }
+                """)
                 
+                logger.info(f"Yes click result: {yes_clicked}")
                 await asyncio.sleep(10)
             else:
                 logger.warning("⚠️ NOT all filled — SKIPPING Submit")
