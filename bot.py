@@ -10,10 +10,12 @@ import re
 import logging
 import tempfile
 import asyncio
+import threading
 import google.generativeai as genai
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from playwright.async_api import async_playwright
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,6 +26,10 @@ GEMINI_API_KEY = re.sub(r'\s+', '', os.environ.get("GEMINI_API_KEY", ""))
 genai.configure(api_key=GEMINI_API_KEY)
 
 FORM_URL = "https://portal.spsc.gov.sa/MEH/Default.aspx?Id=454"
+
+# ذاكرة لتجميع ألبومات الصور
+MEDIA_GROUPS = {}
+MEDIA_GROUPS_LOCK = asyncio.Lock()
 
 
 def extract_from_image(image_path: str, keyword: str = "") -> dict:
@@ -228,7 +234,7 @@ async def fill_all_simple_fields(page, data):
     logger.info("📝 Filling ALL simple fields...")
     await click_radio_hard(page, "ContentPlaceHolder1_ErrorReachPatient_1", "Reach No")
     await asyncio.sleep(0.3)
-    await click_radio_hard(page, "ContentPlaceHolder1_Wasfaty_Chk_0", "Prescription Other/s")
+    await click_radio_hard(page, "ContentPlaceHolder1_Wasfaty_Chk_1", "Prescription Other/s")
     await asyncio.sleep(0.5)
     await fill_text_by_name(page, "other", "ER", "Other ER")
     await asyncio.sleep(0.3)
@@ -397,7 +403,7 @@ async def fill_form(data: dict) -> dict:
                     action: document.getElementById('ContentPlaceHolder1_ActionTaken_Drop')?.value || '',
                     staff: document.getElementById('ContentPlaceHolder1_Staff_Cat_Drop')?.value || '',
                     reach_no: document.getElementById('ContentPlaceHolder1_ErrorReachPatient_1')?.checked || false,
-                    wasfaty_other: document.getElementById('ContentPlaceHolder1_Wasfaty_Chk_0')?.checked || false
+                    wasfaty_other: document.getElementById('ContentPlaceHolder1_Wasfaty_Chk_1')?.checked || false
                 })
             """)
             logger.info(f"🔍 FINAL: {final_check}")
@@ -463,21 +469,6 @@ async def fill_form(data: dict) -> dict:
                 await page.screenshot(path="/tmp/after_submit.png", full_page=True)
                 result["after_submit"] = "/tmp/after_submit.png"
                 
-                modal_visible = await page.evaluate("""
-                    () => {
-                        const modals = document.querySelectorAll('.modal, [role="dialog"]');
-                        const visible = [];
-                        for (const m of modals) {
-                            const style = window.getComputedStyle(m);
-                            if (style.display !== 'none' && m.offsetParent !== null) {
-                                visible.push({id: m.id, classes: m.className, text: m.innerText.substring(0, 200)});
-                            }
-                        }
-                        return visible;
-                    }
-                """)
-                result["modal_info"] = str(modal_visible)
-                
                 yes_success = False
                 for yes_attempt in range(5):
                     yes_result = await page.evaluate("""
@@ -525,17 +516,11 @@ async def fill_form(data: dict) -> dict:
             return result
 
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    if not message.photo and not message.document:
-        await message.reply_text("أرسل صورة مع caption")
-        return
-    keyword = message.caption or ""
-    if not keyword:
-        await message.reply_text("⚠️ اكتب الكلمة المفتاحية")
-        return
+async def process_single_image(message, context, file_id, keyword, image_num=1, total=1):
+    """يعالج صورة واحدة ويرسل النتيجة"""
+    prefix = f"[{image_num}/{total}] " if total > 1 else ""
     
-    await message.reply_text("⏳ جاري المعالجة... (5-7 دقائق ☕)")
+    await message.reply_text(f"{prefix}⏳ جاري المعالجة... (5-7 دقائق ☕)")
     
     heartbeat_running = True
     async def heartbeat():
@@ -547,26 +532,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
     heartbeat_task = asyncio.create_task(heartbeat())
     
-    if message.photo:
-        file = await context.bot.get_file(message.photo[-1].file_id)
-    else:
-        file = await context.bot.get_file(message.document.file_id)
-    
-    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-        await file.download_to_drive(tmp.name)
-        image_path = tmp.name
-    
     try:
+        file = await context.bot.get_file(file_id)
+        
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            await file.download_to_drive(tmp.name)
+            image_path = tmp.name
+        
         extracted = extract_from_image(image_path, keyword)
         if not extracted["mrn"] or not extracted["date"]:
-            await message.reply_text("⚠️ فشل قراءة البيانات")
-            return
+            await message.reply_text(f"{prefix}⚠️ فشل قراءة البيانات")
+            return False
         
         case = get_case_details(keyword, extracted.get("medication", ""))
         full_data = {**extracted, **case}
         
         await message.reply_text(
-            f"📋 {full_data['mrn']} | {full_data['date']} | {full_data['gender']}\n"
+            f"{prefix}📋 {full_data['mrn']} | {full_data['date']} | {full_data['gender']}\n"
             f"Dx: {full_data['diagnosis']}\n"
             f"💊 {full_data['medication_search']}\n\n⏳ ملء النموذج..."
         )
@@ -575,7 +557,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if result.get("field_status"):
             status = result["field_status"]
-            report = "📊 تقرير:\n"
+            report = f"{prefix}📊 تقرير:\n"
             for k, v in status.items():
                 report += f"{'✅' if v else '❌'} {k}\n"
             if result.get("all_filled"):
@@ -584,37 +566,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 report += "\n⚠️ بعض الحقول فاضية"
             await message.reply_text(report)
         
-        screenshots = [
-            ("before_submit", "📸 1. قبل Submit"),
-            ("after_submit", "📸 2. بعد Submit"),
-            ("after_yes", "📸 3. بعد Yes"),
-        ]
-        
-        for key, caption in screenshots:
-            path = result.get(key)
-            if path and os.path.exists(path):
-                try:
-                    with open(path, "rb") as f:
-                        await message.reply_photo(photo=f, caption=caption)
-                except Exception as e:
-                    logger.error(f"Send {key}: {e}")
-        
-        diag = f"🔍 Submit: {'✅' if result.get('submit_clicked') else '❌'}\n"
-        diag += f"🔍 Yes: {'✅' if result.get('yes_success') else '❌'}\n"
-        diag += f"🔍 URL: {result.get('final_url', 'N/A')}"
-        await message.reply_text(diag)
+        # صورة واحدة بس (الأهم) عشان نوفر وقت
+        if result.get("after_yes") and os.path.exists(result["after_yes"]):
+            try:
+                with open(result["after_yes"], "rb") as f:
+                    await message.reply_photo(photo=f, caption=f"{prefix}📸 النتيجة النهائية")
+            except:
+                pass
         
         if result["success"] and result.get("all_filled") and result.get("yes_success"):
-            await message.reply_text("Done ✔️ تحقق من الموقع")
+            await message.reply_text(f"{prefix}Done ✔️ تم التسجيل")
+            return True
         elif result["success"] and result.get("all_filled"):
-            await message.reply_text("⚠️ Submit ضُغط لكن Yes فشل")
+            await message.reply_text(f"{prefix}⚠️ Submit ضُغط لكن Yes فشل")
+            return False
         elif result["success"]:
-            await message.reply_text("⚠️ الحقول غير مكتملة")
+            await message.reply_text(f"{prefix}⚠️ الحقول غير مكتملة")
+            return False
         else:
-            await message.reply_text(f"⚠️ {result.get('error', '')}")
+            await message.reply_text(f"{prefix}⚠️ {result.get('error', '')}")
+            return False
+            
     except Exception as e:
-        logger.error(f"{e}")
-        await message.reply_text(f"❌ {str(e)}")
+        logger.error(f"Process error: {e}")
+        await message.reply_text(f"{prefix}❌ {str(e)}")
+        return False
     finally:
         heartbeat_running = False
         try:
@@ -627,10 +603,127 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
+async def process_media_group(context, group_id):
+    """يعالج ألبوم صور واحد تلو الآخر"""
+    await asyncio.sleep(3)  # ننتظر كل صور الألبوم توصل
+    
+    async with MEDIA_GROUPS_LOCK:
+        if group_id not in MEDIA_GROUPS:
+            return
+        group = MEDIA_GROUPS.pop(group_id)
+    
+    messages = group["messages"]
+    keyword = group["keyword"]
+    first_message = messages[0]
+    
+    if not keyword:
+        await first_message.reply_text("⚠️ اكتب الكلمة المفتاحية في caption")
+        return
+    
+    total = len(messages)
+    if total > 5:
+        await first_message.reply_text(f"⚠️ الحد الأقصى 5 صور. استلمت {total} صور، سأعالج أول 5 فقط.")
+        messages = messages[:5]
+        total = 5
+    
+    await first_message.reply_text(
+        f"📸 استلمت {total} صور\n"
+        f"🔑 الكلمة المفتاحية: {keyword}\n"
+        f"⏳ سأعالجها واحدة واحدة (قد تأخذ {total * 7} دقيقة)"
+    )
+    
+    success_count = 0
+    for i, msg in enumerate(messages, 1):
+        if msg.photo:
+            file_id = msg.photo[-1].file_id
+        elif msg.document:
+            file_id = msg.document.file_id
+        else:
+            continue
+        
+        logger.info(f"Processing image {i}/{total}")
+        success = await process_single_image(first_message, context, file_id, keyword, i, total)
+        if success:
+            success_count += 1
+    
+    await first_message.reply_text(
+        f"🎉 انتهيت!\n"
+        f"✅ نجح: {success_count}/{total}\n"
+        f"❌ فشل: {total - success_count}/{total}"
+    )
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message.photo and not message.document:
+        await message.reply_text("أرسل صورة مع caption")
+        return
+    
+    # لو الصورة جزء من ألبوم (media group)
+    if message.media_group_id:
+        group_id = message.media_group_id
+        
+        async with MEDIA_GROUPS_LOCK:
+            if group_id not in MEDIA_GROUPS:
+                MEDIA_GROUPS[group_id] = {
+                    "messages": [],
+                    "keyword": message.caption or "",
+                    "task_started": False
+                }
+            
+            MEDIA_GROUPS[group_id]["messages"].append(message)
+            
+            # لو الـ caption موجود (عادة في أول صورة)، نحفظه
+            if message.caption and not MEDIA_GROUPS[group_id]["keyword"]:
+                MEDIA_GROUPS[group_id]["keyword"] = message.caption
+            
+            # نبدأ معالجة الألبوم مرة وحدة فقط
+            if not MEDIA_GROUPS[group_id]["task_started"]:
+                MEDIA_GROUPS[group_id]["task_started"] = True
+                asyncio.create_task(process_media_group(context, group_id))
+        
+        return
+    
+    # صورة واحدة عادية
+    keyword = message.caption or ""
+    if not keyword:
+        await message.reply_text("⚠️ اكتب الكلمة المفتاحية")
+        return
+    
+    if message.photo:
+        file_id = message.photo[-1].file_id
+    else:
+        file_id = message.document.file_id
+    
+    await process_single_image(message, context, file_id, keyword)
+
+
+# ========== Health Check Server ==========
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Bot is running")
+    
+    def log_message(self, format, *args):
+        pass
+
+
+def start_health_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    logger.info(f"🌐 Health server on port {port}")
+    server.serve_forever()
+
+
 def main():
+    health_thread = threading.Thread(target=start_health_server, daemon=True)
+    health_thread.start()
+    
     app = Application.builder().token(TELEGRAM_TOKEN).read_timeout(600).write_timeout(600).connect_timeout(600).pool_timeout(600).build()
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_message))
-    logger.info("Bot started...")
+    logger.info("🤖 Bot started...")
     app.run_polling(drop_pending_updates=True)
 
 
