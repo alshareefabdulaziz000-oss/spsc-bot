@@ -39,9 +39,9 @@ def extract_from_image(image_path: str, keyword: str = "") -> dict:
     k = keyword.lower().strip()
     
     if k == "3 days":
-        med_instruction = "MEDICATION: اسم دواء واحد فقط من الوصفة مكتوب لمدة أكثر من 3 أيام (4 أيام أو 5 أيام أو 7 أيام أو أسبوع). اكتب الاسم العام فقط (مثل: omeprazole أو paracetamol)"
+        med_instruction = "MEDICATION: اسم دواء واحد فقط من الوصفة مكتوب لمدة أكثر من 3 أيام. اكتب الاسم العام فقط"
     elif k == "no diagnosis":
-        med_instruction = "MEDICATION: اسم دواء واحد فقط من الوصفة (أي دواء موجود). اكتب الاسم العام فقط"
+        med_instruction = "MEDICATION: اسم دواء واحد فقط من الوصفة. اكتب الاسم العام فقط"
     else:
         med_instruction = "MEDICATION: omeprazole"
     
@@ -115,7 +115,7 @@ async def fill_text(page, field_id: str, value: str, name: str) -> bool:
                 return True
             await asyncio.sleep(1)
         except Exception as e:
-            logger.error(f"Attempt {attempt+1} {name}: {e}")
+            logger.error(f"{name}: {e}")
             await asyncio.sleep(1)
     return False
 
@@ -274,7 +274,7 @@ async def fill_all_simple_fields(page, data):
     await select_option_by_label(page, "ContentPlaceHolder1_Gender_Drop", data['gender'], "Gender")
     await select_option_by_label(page, "ContentPlaceHolder1_WhereItHappen_Drop", "ER Adult", "Where")
     
-    # Diagnosis - autocomplete محسّن
+    # Diagnosis - autocomplete مع تشخيص
     try:
         await page.click("#ContentPlaceHolder1_txtDiagnosis")
         await asyncio.sleep(0.5)
@@ -282,17 +282,53 @@ async def fill_all_simple_fields(page, data):
         await page.fill("#ContentPlaceHolder1_txtDiagnosis", "")
         await asyncio.sleep(0.3)
         
-        # نكتب حرف حرف مع تأخير
         for char in term:
-            await page.keyboard.type(char, delay=150)
+            await page.keyboard.type(char, delay=200)
         
-        # ننتظر القائمة تظهر
-        await asyncio.sleep(4)
+        await asyncio.sleep(5)
         
-        # نحاول النقر على الخيار الأول بعدة طرق
+        # Screenshot للتشخيص
+        await page.screenshot(path="/tmp/diagnosis_dropdown.png", full_page=False)
+        
+        # فحص كل القوائم الظاهرة
+        dropdown_info = await page.evaluate("""
+            () => {
+                const info = {
+                    visible_uls: [],
+                    autocomplete_elements: []
+                };
+                
+                document.querySelectorAll('ul').forEach(ul => {
+                    if (ul.offsetParent !== null) {
+                        info.visible_uls.push({
+                            id: ul.id,
+                            classes: ul.className,
+                            children_count: ul.children.length,
+                            first_item_html: ul.children[0] ? ul.children[0].outerHTML.substring(0, 300) : ''
+                        });
+                    }
+                });
+                
+                document.querySelectorAll('[class*="autocomplete" i], [class*="ui-menu" i], [class*="dropdown" i]').forEach(el => {
+                    if (el.offsetParent !== null) {
+                        info.autocomplete_elements.push({
+                            tag: el.tagName,
+                            id: el.id,
+                            classes: el.className,
+                            html: el.outerHTML.substring(0, 400)
+                        });
+                    }
+                });
+                
+                return info;
+            }
+        """)
+        
+        logger.info(f"🔍 DROPDOWN INFO: {dropdown_info}")
+        
+        # محاولة النقر
         diagnosis_clicked = await page.evaluate("""
             () => {
-                // الطريقة 1: jQuery UI autocomplete
                 const uiMenu = document.querySelector('.ui-autocomplete:not([style*="display: none"]), .ui-menu:not([style*="display: none"])');
                 if (uiMenu) {
                     const firstItem = uiMenu.querySelector('li a, li.ui-menu-item, .ui-menu-item-wrapper');
@@ -302,7 +338,6 @@ async def fill_all_simple_fields(page, data):
                     }
                 }
                 
-                // الطريقة 2: أي dropdown ظاهر قرب input
                 const input = document.getElementById('ContentPlaceHolder1_txtDiagnosis');
                 if (input) {
                     const allLists = document.querySelectorAll('ul');
@@ -321,7 +356,6 @@ async def fill_all_simple_fields(page, data):
                     }
                 }
                 
-                // الطريقة 3: أي عنصر autocomplete
                 const items = document.querySelectorAll('.autocomplete-item, [class*="autocomplete"] li, [role="option"]');
                 for (const item of items) {
                     if (item.offsetParent !== null) {
@@ -334,13 +368,11 @@ async def fill_all_simple_fields(page, data):
             }
         """)
         
-        logger.info(f"Diagnosis dropdown: {diagnosis_clicked}")
+        logger.info(f"Diagnosis clicked: {diagnosis_clicked}")
         await asyncio.sleep(1)
         
-        # fallback: ArrowDown + Enter
         val = await page.evaluate("() => document.getElementById('ContentPlaceHolder1_txtDiagnosis')?.value")
         if not val or len(val) < 3:
-            logger.info("Trying ArrowDown+Enter fallback...")
             await page.focus("#ContentPlaceHolder1_txtDiagnosis")
             await asyncio.sleep(0.5)
             await page.keyboard.press("ArrowDown")
@@ -364,7 +396,7 @@ async def fill_all_simple_fields(page, data):
 
 async def fill_form(data: dict) -> dict:
     result = {"success": False, "error": "", "field_status": {}, "all_filled": False,
-              "before_submit": "", "after_submit": "", "after_yes": "",
+              "before_submit": "", "after_submit": "", "after_yes": "", "diagnosis_screenshot": "",
               "submit_clicked": False, "yes_success": False, "final_url": ""}
     
     try:
@@ -387,6 +419,9 @@ async def fill_form(data: dict) -> dict:
             logger.info("========== ROUND 1 ==========")
             await fill_all_simple_fields(page, data)
             await asyncio.sleep(2)
+            
+            if os.path.exists("/tmp/diagnosis_dropdown.png"):
+                result["diagnosis_screenshot"] = "/tmp/diagnosis_dropdown.png"
             
             logger.info("========== Type + Add ==========")
             type_labels = {"12": "Wrong/missed indication", "9": "wrong/missed duration", "1": "Wrong/missed dose"}
@@ -496,7 +531,7 @@ async def fill_form(data: dict) -> dict:
             result["all_filled"] = all_ok
             
             if all_ok:
-                logger.info("🚀 Starting Submit...")
+                logger.info("🚀 Submitting...")
                 await page.evaluate("""
                     () => {
                         const btn = document.getElementById('ContentPlaceHolder1_Submit_Btn');
@@ -529,9 +564,6 @@ async def fill_form(data: dict) -> dict:
                 
                 result["submit_clicked"] = submit_clicked
                 await asyncio.sleep(5)
-                
-                await page.screenshot(path="/tmp/after_submit.png", full_page=True)
-                result["after_submit"] = "/tmp/after_submit.png"
                 
                 yes_success = False
                 for yes_attempt in range(5):
@@ -605,6 +637,13 @@ async def process_one(message, context, image_path, keyword, prefix=""):
                 report += "\n⚠️ بعض الحقول فاضية"
             await message.reply_text(report)
         
+        # Screenshot تشخيصي لـ Diagnosis
+        if result.get("diagnosis_screenshot") and os.path.exists(result["diagnosis_screenshot"]):
+            try:
+                with open(result["diagnosis_screenshot"], "rb") as f:
+                    await message.reply_photo(photo=f, caption=f"{prefix}🔍 قائمة Diagnosis وقت الكتابة")
+            except: pass
+        
         if result.get("after_yes") and os.path.exists(result["after_yes"]):
             try:
                 with open(result["after_yes"], "rb") as f:
@@ -620,7 +659,7 @@ async def process_one(message, context, image_path, keyword, prefix=""):
         await message.reply_text(diag)
         
         if result["success"] and result.get("all_filled") and result.get("yes_success"):
-            await message.reply_text(f"{prefix}Done ✔️ تم التسجيل")
+            await message.reply_text(f"{prefix}Done ✔️")
             return True
         elif result["success"] and result.get("all_filled"):
             await message.reply_text(f"{prefix}⚠️ Submit ضُغط لكن Yes فشل")
@@ -650,12 +689,11 @@ async def process_media_group(context, group_id):
     first_message = messages[0]
     
     if not keyword:
-        await first_message.reply_text("⚠️ اكتب الكلمة المفتاحية في caption")
+        await first_message.reply_text("⚠️ اكتب الكلمة المفتاحية")
         return
     
     total = len(messages)
     if total > 5:
-        await first_message.reply_text(f"⚠️ الحد الأقصى 5 صور. سأعالج أول 5 فقط.")
         messages = messages[:5]
         total = 5
     
@@ -678,7 +716,6 @@ async def process_media_group(context, group_id):
         success_count = 0
         for i, msg in enumerate(messages, 1):
             prefix = f"[{i}/{total}] "
-            
             if msg.photo:
                 file_id = msg.photo[-1].file_id
             elif msg.document:
@@ -698,8 +735,7 @@ async def process_media_group(context, group_id):
                 if success:
                     success_count += 1
                 
-                try:
-                    os.unlink(image_path)
+                try: os.unlink(image_path)
                 except: pass
             except Exception as e:
                 logger.error(f"Image {i}: {e}")
@@ -724,14 +760,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if message.media_group_id:
         group_id = message.media_group_id
-        
         async with MEDIA_GROUPS_LOCK:
             if group_id not in MEDIA_GROUPS:
-                MEDIA_GROUPS[group_id] = {
-                    "messages": [],
-                    "keyword": message.caption or "",
-                    "task_started": False
-                }
+                MEDIA_GROUPS[group_id] = {"messages": [], "keyword": message.caption or "", "task_started": False}
             MEDIA_GROUPS[group_id]["messages"].append(message)
             if message.caption and not MEDIA_GROUPS[group_id]["keyword"]:
                 MEDIA_GROUPS[group_id]["keyword"] = message.caption
@@ -768,8 +799,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await process_one(message, context, image_path, keyword)
         
-        try:
-            os.unlink(image_path)
+        try: os.unlink(image_path)
         except: pass
     except Exception as e:
         logger.error(f"{e}")
