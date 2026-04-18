@@ -48,9 +48,10 @@ def extract_from_image(image_path: str, keyword: str = "") -> dict:
     prompt = f"""من صورة الوصفة الطبية استخرج البيانات بدقة تامة:
 
 1. MRN: رقم المريض
-2. DATE: (DD/MM/YYYY)
-3. GENDER: Male أو Female
-4. DIAGNOSIS: اقرأ خانة Indication من الصورة بدقة
+2. DATE: التاريخ بصيغة DD/MM/YYYY
+3. TIME: الوقت بصيغة HH:MM (24 ساعة). اقرأ الوقت من الوصفة. إذا ما وجدت وقت، اكتب 10:00
+4. GENDER: Male أو Female
+5. DIAGNOSIS: اقرأ خانة Indication من الصورة بدقة
    - إذا كان فيها رقم ICD-10 (مثل N94.6): حوّل الرقم إلى اسم المرض الرسمي
      أمثلة: N94.6 → Dysmenorrhea | J06.9 → Acute upper respiratory infection
      R51 → Headache | K29.7 → Gastritis | M79.3 → Myalgia | R10.4 → Abdominal pain
@@ -58,30 +59,33 @@ def extract_from_image(image_path: str, keyword: str = "") -> dict:
    - إذا كان فيها اسم مرض مكتوب بالإنجليزي: اكتبه كما هو
    - إذا كانت خانة Indication فاضية أو غير موجودة: اكتب EMPTY
    - ممنوع تختلق أو تخمّن تشخيص غير موجود في الصورة
-5. {med_instruction}
+6. {med_instruction}
 
 أجب بهذا التنسيق بالضبط:
 MRN: xxxxx
 DATE: DD/MM/YYYY
+TIME: HH:MM
 GENDER: Male
 DIAGNOSIS: اسم المرض أو EMPTY
 MEDICATION: xxxxx"""
     
     response = model.generate_content([prompt, {"mime_type": "image/jpeg", "data": image_data}])
     text = response.text.strip()
-    result = {"mrn": "", "date": "", "gender": "Male", "diagnosis": "", "medication": ""}
+    result = {"mrn": "", "date": "", "time": "10:00", "gender": "Male", "diagnosis": "", "medication": ""}
     for line in text.split("\n"):
         line = line.strip()
         if line.startswith("MRN:"): result["mrn"] = line.split("MRN:")[1].strip()
         elif line.startswith("DATE:"): result["date"] = line.split("DATE:")[1].strip()
+        elif line.startswith("TIME:"): result["time"] = line.split("TIME:")[1].strip()
         elif line.startswith("GENDER:"): result["gender"] = line.split("GENDER:")[1].strip()
         elif line.startswith("DIAGNOSIS:"): result["diagnosis"] = line.split("DIAGNOSIS:")[1].strip()
         elif line.startswith("MEDICATION:"): result["medication"] = line.split("MEDICATION:")[1].strip()
-    # فقط لو Gemini رجع EMPTY (يعني الخانة فاضية في الصورة)، نستخدم headache كـ default
     if not result["diagnosis"] or result["diagnosis"].upper() == "EMPTY":
         result["diagnosis"] = "headache"
     if not result["medication"] or result["medication"].upper() == "EMPTY":
         result["medication"] = "paracetamol"
+    if not result["time"]:
+        result["time"] = "10:00"
     return result
 
 
@@ -256,11 +260,36 @@ async def fill_all_simple_fields(page, data):
     await fill_text_by_name(page, "other", "ER", "Other ER")
     await asyncio.sleep(0.3)
     
+    # التاريخ والوقت
     date_parts = data['date'].split('/')
+    time_str = data.get('time', '10:00')
+    try:
+        time_parts = time_str.split(':')
+        hh = time_parts[0].zfill(2)
+        mm_time = time_parts[1].zfill(2) if len(time_parts) > 1 else '00'
+        hh_int = int(hh)
+        if hh_int == 0:
+            hh_12 = '12'
+            period = 'AM'
+        elif hh_int < 12:
+            hh_12 = str(hh_int).zfill(2)
+            period = 'AM'
+        elif hh_int == 12:
+            hh_12 = '12'
+            period = 'PM'
+        else:
+            hh_12 = str(hh_int - 12).zfill(2)
+            period = 'PM'
+    except:
+        hh = '10'
+        mm_time = '00'
+        hh_12 = '10'
+        period = 'AM'
+    
     if len(date_parts) == 3:
         dd, mm, yyyy = date_parts
-        iso = f"{yyyy}-{mm.zfill(2)}-{dd.zfill(2)}T10:00:00"
-        formatted = f"{dd.zfill(2)}/{mm.zfill(2)}/{yyyy} 10:00 AM"
+        iso = f"{yyyy}-{mm.zfill(2)}-{dd.zfill(2)}T{hh}:{mm_time}:00"
+        formatted = f"{dd.zfill(2)}/{mm.zfill(2)}/{yyyy} {hh_12}:{mm_time} {period}"
     else:
         iso = "2026-04-15T10:00:00"
         formatted = "15/04/2026 10:00 AM"
@@ -292,16 +321,17 @@ async def fill_all_simple_fields(page, data):
     await select_option_by_label(page, "ContentPlaceHolder1_Gender_Drop", data['gender'], "Gender")
     await select_option_by_label(page, "ContentPlaceHolder1_WhereItHappen_Drop", "ER Adult", "Where")
     
-    # Diagnosis - autocomplete
+    # Diagnosis - نكتب الاسم كامل
     try:
         await page.click("#ContentPlaceHolder1_txtDiagnosis")
         await asyncio.sleep(0.5)
-        term = data['diagnosis'][:5] if len(data['diagnosis']) >= 3 else "headache"
+        # نكتب التشخيص كامل لضمان الدقة
+        term = data['diagnosis'] if data['diagnosis'] else "headache"
         await page.fill("#ContentPlaceHolder1_txtDiagnosis", "")
         await asyncio.sleep(0.3)
         
         for char in term:
-            await page.keyboard.type(char, delay=200)
+            await page.keyboard.type(char, delay=150)
         
         await asyncio.sleep(5)
         
@@ -589,7 +619,7 @@ async def process_one(message, context, image_path, keyword, prefix=""):
         full_data = {**extracted, **case}
         
         await message.reply_text(
-            f"{prefix}📋 {full_data['mrn']} | {full_data['date']} | {full_data['gender']}\n"
+            f"{prefix}📋 {full_data['mrn']} | {full_data['date']} {full_data.get('time', '10:00')} | {full_data['gender']}\n"
             f"Dx: {full_data['diagnosis']}\n"
             f"💊 {full_data['medication_search']}\n\n⏳ ملء النموذج..."
         )
