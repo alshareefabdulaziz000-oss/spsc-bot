@@ -49,14 +49,24 @@ def extract_from_image(image_path: str, keyword: str = "") -> dict:
 1. MRN: رقم المريض
 2. DATE: (DD/MM/YYYY)
 3. GENDER: Male أو Female
-4. DIAGNOSIS: من Indication (EMPTY إذا فاضي)
+4. DIAGNOSIS: 
+   - اقرأ خانة Indication من الصورة
+   - إذا كان فيها رقم ICD-10 فقط (مثل N94.6 أو J06.9 أو K29.7) → حوّله إلى اسم المرض بالإنجليزي
+   - إذا كان فيها اسم مرض بالفعل → اكتبه كما هو
+   - إذا كانت فاضية → اكتب EMPTY
+   - مثال: "N94.6" → "Dysmenorrhea"
+   - مثال: "J06.9" → "Acute upper respiratory infection"
+   - مثال: "R51" → "Headache"
+   - مثال: "K29.7" → "Gastritis"
+   - مثال: "M79.3" → "Myalgia"
+   - المهم: اكتب الاسم الإنجليزي فقط بدون الرقم
 5. {med_instruction}
 
-أجب:
+أجب بهذا التنسيق بالضبط:
 MRN: xxxxx
 DATE: DD/MM/YYYY
 GENDER: Male
-DIAGNOSIS: xxxxx
+DIAGNOSIS: اسم المرض بالإنجليزي
 MEDICATION: xxxxx"""
     
     response = model.generate_content([prompt, {"mime_type": "image/jpeg", "data": image_data}])
@@ -274,7 +284,7 @@ async def fill_all_simple_fields(page, data):
     await select_option_by_label(page, "ContentPlaceHolder1_Gender_Drop", data['gender'], "Gender")
     await select_option_by_label(page, "ContentPlaceHolder1_WhereItHappen_Drop", "ER Adult", "Where")
     
-    # Diagnosis - autocomplete مع تشخيص
+    # Diagnosis - autocomplete
     try:
         await page.click("#ContentPlaceHolder1_txtDiagnosis")
         await asyncio.sleep(0.5)
@@ -287,46 +297,8 @@ async def fill_all_simple_fields(page, data):
         
         await asyncio.sleep(5)
         
-        # Screenshot للتشخيص
         await page.screenshot(path="/tmp/diagnosis_dropdown.png", full_page=False)
         
-        # فحص كل القوائم الظاهرة
-        dropdown_info = await page.evaluate("""
-            () => {
-                const info = {
-                    visible_uls: [],
-                    autocomplete_elements: []
-                };
-                
-                document.querySelectorAll('ul').forEach(ul => {
-                    if (ul.offsetParent !== null) {
-                        info.visible_uls.push({
-                            id: ul.id,
-                            classes: ul.className,
-                            children_count: ul.children.length,
-                            first_item_html: ul.children[0] ? ul.children[0].outerHTML.substring(0, 300) : ''
-                        });
-                    }
-                });
-                
-                document.querySelectorAll('[class*="autocomplete" i], [class*="ui-menu" i], [class*="dropdown" i]').forEach(el => {
-                    if (el.offsetParent !== null) {
-                        info.autocomplete_elements.push({
-                            tag: el.tagName,
-                            id: el.id,
-                            classes: el.className,
-                            html: el.outerHTML.substring(0, 400)
-                        });
-                    }
-                });
-                
-                return info;
-            }
-        """)
-        
-        logger.info(f"🔍 DROPDOWN INFO: {dropdown_info}")
-        
-        # محاولة النقر
         diagnosis_clicked = await page.evaluate("""
             () => {
                 const uiMenu = document.querySelector('.ui-autocomplete:not([style*="display: none"]), .ui-menu:not([style*="display: none"])');
@@ -396,7 +368,7 @@ async def fill_all_simple_fields(page, data):
 
 async def fill_form(data: dict) -> dict:
     result = {"success": False, "error": "", "field_status": {}, "all_filled": False,
-              "before_submit": "", "after_submit": "", "after_yes": "", "diagnosis_screenshot": "",
+              "before_submit": "", "after_submit": "", "after_yes": "",
               "submit_clicked": False, "yes_success": False, "final_url": ""}
     
     try:
@@ -419,9 +391,6 @@ async def fill_form(data: dict) -> dict:
             logger.info("========== ROUND 1 ==========")
             await fill_all_simple_fields(page, data)
             await asyncio.sleep(2)
-            
-            if os.path.exists("/tmp/diagnosis_dropdown.png"):
-                result["diagnosis_screenshot"] = "/tmp/diagnosis_dropdown.png"
             
             logger.info("========== Type + Add ==========")
             type_labels = {"12": "Wrong/missed indication", "9": "wrong/missed duration", "1": "Wrong/missed dose"}
@@ -636,13 +605,6 @@ async def process_one(message, context, image_path, keyword, prefix=""):
             else:
                 report += "\n⚠️ بعض الحقول فاضية"
             await message.reply_text(report)
-        
-        # Screenshot تشخيصي لـ Diagnosis
-        if result.get("diagnosis_screenshot") and os.path.exists(result["diagnosis_screenshot"]):
-            try:
-                with open(result["diagnosis_screenshot"], "rb") as f:
-                    await message.reply_photo(photo=f, caption=f"{prefix}🔍 قائمة Diagnosis وقت الكتابة")
-            except: pass
         
         if result.get("after_yes") and os.path.exists(result["after_yes"]):
             try:
