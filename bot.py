@@ -45,28 +45,26 @@ def extract_from_image(image_path: str, keyword: str = "") -> dict:
     else:
         med_instruction = "MEDICATION: omeprazole"
     
-    prompt = f"""من صورة الوصفة الطبية استخرج:
+    prompt = f"""من صورة الوصفة الطبية استخرج البيانات بدقة تامة:
+
 1. MRN: رقم المريض
 2. DATE: (DD/MM/YYYY)
 3. GENDER: Male أو Female
-4. DIAGNOSIS: 
-   - اقرأ خانة Indication من الصورة
-   - إذا كان فيها رقم ICD-10 فقط (مثل N94.6 أو J06.9 أو K29.7) → حوّله إلى اسم المرض بالإنجليزي
-   - إذا كان فيها اسم مرض بالفعل → اكتبه كما هو
-   - إذا كانت فاضية → اكتب EMPTY
-   - مثال: "N94.6" → "Dysmenorrhea"
-   - مثال: "J06.9" → "Acute upper respiratory infection"
-   - مثال: "R51" → "Headache"
-   - مثال: "K29.7" → "Gastritis"
-   - مثال: "M79.3" → "Myalgia"
-   - المهم: اكتب الاسم الإنجليزي فقط بدون الرقم
+4. DIAGNOSIS: اقرأ خانة Indication من الصورة بدقة
+   - إذا كان فيها رقم ICD-10 (مثل N94.6): حوّل الرقم إلى اسم المرض الرسمي
+     أمثلة: N94.6 → Dysmenorrhea | J06.9 → Acute upper respiratory infection
+     R51 → Headache | K29.7 → Gastritis | M79.3 → Myalgia | R10.4 → Abdominal pain
+     J02.9 → Acute pharyngitis | H66.9 → Otitis media | L30.9 → Dermatitis
+   - إذا كان فيها اسم مرض مكتوب بالإنجليزي: اكتبه كما هو
+   - إذا كانت خانة Indication فاضية أو غير موجودة: اكتب EMPTY
+   - ممنوع تختلق أو تخمّن تشخيص غير موجود في الصورة
 5. {med_instruction}
 
 أجب بهذا التنسيق بالضبط:
 MRN: xxxxx
 DATE: DD/MM/YYYY
 GENDER: Male
-DIAGNOSIS: اسم المرض بالإنجليزي
+DIAGNOSIS: اسم المرض أو EMPTY
 MEDICATION: xxxxx"""
     
     response = model.generate_content([prompt, {"mime_type": "image/jpeg", "data": image_data}])
@@ -79,6 +77,7 @@ MEDICATION: xxxxx"""
         elif line.startswith("GENDER:"): result["gender"] = line.split("GENDER:")[1].strip()
         elif line.startswith("DIAGNOSIS:"): result["diagnosis"] = line.split("DIAGNOSIS:")[1].strip()
         elif line.startswith("MEDICATION:"): result["medication"] = line.split("MEDICATION:")[1].strip()
+    # فقط لو Gemini رجع EMPTY (يعني الخانة فاضية في الصورة)، نستخدم headache كـ default
     if not result["diagnosis"] or result["diagnosis"].upper() == "EMPTY":
         result["diagnosis"] = "headache"
     if not result["medication"] or result["medication"].upper() == "EMPTY":
@@ -98,6 +97,15 @@ def get_case_details(keyword: str, extracted_medication: str = "") -> dict:
         return {"description": "Didn't write the diagnosis", "medication_search": med, "type_of_error": "12"}
     else:
         return {"description": keyword, "medication_search": keyword, "type_of_error": "1"}
+
+
+async def safe_wait_after_postback(page, seconds=5):
+    try:
+        await asyncio.sleep(seconds)
+        await page.wait_for_load_state("networkidle", timeout=15000)
+    except:
+        pass
+    await asyncio.sleep(1)
 
 
 async def fill_text(page, field_id: str, value: str, name: str) -> bool:
@@ -297,8 +305,6 @@ async def fill_all_simple_fields(page, data):
         
         await asyncio.sleep(5)
         
-        await page.screenshot(path="/tmp/diagnosis_dropdown.png", full_page=False)
-        
         diagnosis_clicked = await page.evaluate("""
             () => {
                 const uiMenu = document.querySelector('.ui-autocomplete:not([style*="display: none"]), .ui-menu:not([style*="display: none"])');
@@ -328,19 +334,11 @@ async def fill_all_simple_fields(page, data):
                     }
                 }
                 
-                const items = document.querySelectorAll('.autocomplete-item, [class*="autocomplete"] li, [role="option"]');
-                for (const item of items) {
-                    if (item.offsetParent !== null) {
-                        item.click();
-                        return 'clicked: autocomplete item';
-                    }
-                }
-                
                 return 'not found';
             }
         """)
         
-        logger.info(f"Diagnosis clicked: {diagnosis_clicked}")
+        logger.info(f"Diagnosis: {diagnosis_clicked}")
         await asyncio.sleep(1)
         
         val = await page.evaluate("() => document.getElementById('ContentPlaceHolder1_txtDiagnosis')?.value")
@@ -351,9 +349,6 @@ async def fill_all_simple_fields(page, data):
             await asyncio.sleep(0.5)
             await page.keyboard.press("Enter")
             await asyncio.sleep(1)
-        
-        final_val = await page.evaluate("() => document.getElementById('ContentPlaceHolder1_txtDiagnosis')?.value")
-        logger.info(f"✅ Diagnosis final: '{final_val}'")
     except Exception as e:
         logger.error(f"Diagnosis: {e}")
     
@@ -399,7 +394,7 @@ async def fill_form(data: dict) -> dict:
             await asyncio.sleep(0.5)
             try:
                 await page.click("#ContentPlaceHolder1_NewTypeOfError_Main_Btn", timeout=10000)
-                await asyncio.sleep(5)
+                await safe_wait_after_postback(page, 5)
             except Exception as e:
                 logger.error(f"Type Add: {e}")
             
@@ -424,7 +419,7 @@ async def fill_form(data: dict) -> dict:
                     await page.select_option("#ContentPlaceHolder1_Generic_Name_Drop", value=med_value)
                     await asyncio.sleep(0.5)
                     await page.click("#ContentPlaceHolder1_Add_Med", timeout=10000)
-                    await asyncio.sleep(5)
+                    await safe_wait_after_postback(page, 5)
             except Exception as e:
                 logger.error(f"Medication: {e}")
             
@@ -434,6 +429,7 @@ async def fill_form(data: dict) -> dict:
             
             logger.info("========== Factor + Add ==========")
             try:
+                await asyncio.sleep(2)
                 factor_value = await page.evaluate("""
                     () => {
                         const sel = document.getElementById('ContentPlaceHolder1_Factors_Drop');
@@ -446,9 +442,11 @@ async def fill_form(data: dict) -> dict:
                 """)
                 if factor_value:
                     await page.select_option("#ContentPlaceHolder1_Factors_Drop", value=factor_value)
-                    await asyncio.sleep(0.5)
-                    await page.click("#ContentPlaceHolder1_Factors_Main_Btn", timeout=10000)
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(1)
+                    await page.click("#ContentPlaceHolder1_Factors_Main_Btn", timeout=10000, force=True)
+                    await safe_wait_after_postback(page, 6)
+                else:
+                    logger.error("Factor value not found!")
             except Exception as e:
                 logger.error(f"Factor: {e}")
             
@@ -536,23 +534,26 @@ async def fill_form(data: dict) -> dict:
                 
                 yes_success = False
                 for yes_attempt in range(5):
-                    yes_result = await page.evaluate("""
-                        () => {
-                            const allButtons = document.querySelectorAll('input[type="button"], input[type="submit"], button, a');
-                            for (const b of allButtons) {
-                                const text = (b.value || b.innerText || '').trim();
-                                const visible = b.offsetParent !== null;
-                                if (visible && text === 'Yes') {
-                                    b.click();
-                                    return {clicked: true};
+                    try:
+                        yes_result = await page.evaluate("""
+                            () => {
+                                const allButtons = document.querySelectorAll('input[type="button"], input[type="submit"], button, a');
+                                for (const b of allButtons) {
+                                    const text = (b.value || b.innerText || '').trim();
+                                    const visible = b.offsetParent !== null;
+                                    if (visible && text === 'Yes') {
+                                        b.click();
+                                        return {clicked: true};
+                                    }
                                 }
+                                return {clicked: false};
                             }
-                            return {clicked: false};
-                        }
-                    """)
-                    if yes_result.get('clicked'):
-                        yes_success = True
-                        break
+                        """)
+                        if yes_result.get('clicked'):
+                            yes_success = True
+                            break
+                    except:
+                        pass
                     await asyncio.sleep(2)
                 
                 result["yes_success"] = yes_success
@@ -640,7 +641,6 @@ async def process_one(message, context, image_path, keyword, prefix=""):
 
 async def process_media_group(context, group_id):
     await asyncio.sleep(3)
-    
     async with MEDIA_GROUPS_LOCK:
         if group_id not in MEDIA_GROUPS:
             return
@@ -659,11 +659,7 @@ async def process_media_group(context, group_id):
         messages = messages[:5]
         total = 5
     
-    await first_message.reply_text(
-        f"📸 استلمت {total} صور\n"
-        f"🔑 {keyword}\n"
-        f"⏳ سأعالجها واحدة واحدة"
-    )
+    await first_message.reply_text(f"📸 {total} صور | 🔑 {keyword}\n⏳ سأعالجها واحدة واحدة")
     
     heartbeat_running = True
     async def heartbeat():
@@ -696,18 +692,13 @@ async def process_media_group(context, group_id):
                 success = await process_one(first_message, context, image_path, keyword, prefix)
                 if success:
                     success_count += 1
-                
                 try: os.unlink(image_path)
                 except: pass
             except Exception as e:
                 logger.error(f"Image {i}: {e}")
                 await first_message.reply_text(f"{prefix}❌ {str(e)}")
         
-        await first_message.reply_text(
-            f"🎉 انتهيت!\n"
-            f"✅ نجح: {success_count}/{total}\n"
-            f"❌ فشل: {total - success_count}/{total}"
-        )
+        await first_message.reply_text(f"🎉 انتهيت!\n✅ نجح: {success_count}/{total}\n❌ فشل: {total - success_count}/{total}")
     finally:
         heartbeat_running = False
         try: heartbeat_task.cancel()
@@ -760,7 +751,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             image_path = tmp.name
         
         await process_one(message, context, image_path, keyword)
-        
         try: os.unlink(image_path)
         except: pass
     except Exception as e:
@@ -792,7 +782,6 @@ def start_health_server():
 def main():
     health_thread = threading.Thread(target=start_health_server, daemon=True)
     health_thread.start()
-    
     app = Application.builder().token(TELEGRAM_TOKEN).read_timeout(600).write_timeout(600).connect_timeout(600).pool_timeout(600).build()
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_message))
     logger.info("🤖 Bot started...")
