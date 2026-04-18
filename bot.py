@@ -27,7 +27,6 @@ genai.configure(api_key=GEMINI_API_KEY)
 
 FORM_URL = "https://portal.spsc.gov.sa/MEH/Default.aspx?Id=454"
 
-# ذاكرة لتجميع ألبومات الصور
 MEDIA_GROUPS = {}
 MEDIA_GROUPS_LOCK = asyncio.Lock()
 
@@ -516,29 +515,9 @@ async def fill_form(data: dict) -> dict:
             return result
 
 
-async def process_single_image(message, context, file_id, keyword, image_num=1, total=1):
-    """يعالج صورة واحدة ويرسل النتيجة"""
-    prefix = f"[{image_num}/{total}] " if total > 1 else ""
-    
-    await message.reply_text(f"{prefix}⏳ جاري المعالجة... (5-7 دقائق ☕)")
-    
-    heartbeat_running = True
-    async def heartbeat():
-        while heartbeat_running:
-            await asyncio.sleep(25)
-            try:
-                await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
-            except:
-                pass
-    heartbeat_task = asyncio.create_task(heartbeat())
-    
+async def process_one(message, context, image_path, keyword, prefix=""):
+    """يعالج صورة واحدة — نفس المنطق القديم اللي كان شغال"""
     try:
-        file = await context.bot.get_file(file_id)
-        
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-            await file.download_to_drive(tmp.name)
-            image_path = tmp.name
-        
         extracted = extract_from_image(image_path, keyword)
         if not extracted["mrn"] or not extracted["date"]:
             await message.reply_text(f"{prefix}⚠️ فشل قراءة البيانات")
@@ -566,13 +545,22 @@ async def process_single_image(message, context, file_id, keyword, image_num=1, 
                 report += "\n⚠️ بعض الحقول فاضية"
             await message.reply_text(report)
         
-        # صورة واحدة بس (الأهم) عشان نوفر وقت
+        # screenshot واحد فقط (الأهم)
         if result.get("after_yes") and os.path.exists(result["after_yes"]):
             try:
                 with open(result["after_yes"], "rb") as f:
-                    await message.reply_photo(photo=f, caption=f"{prefix}📸 النتيجة النهائية")
+                    await message.reply_photo(photo=f, caption=f"{prefix}📸 النتيجة")
             except:
                 pass
+        elif result.get("before_submit") and os.path.exists(result["before_submit"]):
+            try:
+                with open(result["before_submit"], "rb") as f:
+                    await message.reply_photo(photo=f, caption=f"{prefix}📸")
+            except:
+                pass
+        
+        diag = f"{prefix}🔍 Submit: {'✅' if result.get('submit_clicked') else '❌'} | Yes: {'✅' if result.get('yes_success') else '❌'}"
+        await message.reply_text(diag)
         
         if result["success"] and result.get("all_filled") and result.get("yes_success"):
             await message.reply_text(f"{prefix}Done ✔️ تم التسجيل")
@@ -586,26 +574,15 @@ async def process_single_image(message, context, file_id, keyword, image_num=1, 
         else:
             await message.reply_text(f"{prefix}⚠️ {result.get('error', '')}")
             return False
-            
     except Exception as e:
-        logger.error(f"Process error: {e}")
+        logger.error(f"process_one: {e}")
         await message.reply_text(f"{prefix}❌ {str(e)}")
         return False
-    finally:
-        heartbeat_running = False
-        try:
-            heartbeat_task.cancel()
-        except:
-            pass
-        try:
-            os.unlink(image_path)
-        except:
-            pass
 
 
 async def process_media_group(context, group_id):
     """يعالج ألبوم صور واحد تلو الآخر"""
-    await asyncio.sleep(3)  # ننتظر كل صور الألبوم توصل
+    await asyncio.sleep(3)
     
     async with MEDIA_GROUPS_LOCK:
         if group_id not in MEDIA_GROUPS:
@@ -622,35 +599,70 @@ async def process_media_group(context, group_id):
     
     total = len(messages)
     if total > 5:
-        await first_message.reply_text(f"⚠️ الحد الأقصى 5 صور. استلمت {total} صور، سأعالج أول 5 فقط.")
+        await first_message.reply_text(f"⚠️ الحد الأقصى 5 صور. سأعالج أول 5 فقط.")
         messages = messages[:5]
         total = 5
     
     await first_message.reply_text(
         f"📸 استلمت {total} صور\n"
-        f"🔑 الكلمة المفتاحية: {keyword}\n"
-        f"⏳ سأعالجها واحدة واحدة (قد تأخذ {total * 7} دقيقة)"
+        f"🔑 الكلمة: {keyword}\n"
+        f"⏳ سأعالجها واحدة واحدة"
     )
     
-    success_count = 0
-    for i, msg in enumerate(messages, 1):
-        if msg.photo:
-            file_id = msg.photo[-1].file_id
-        elif msg.document:
-            file_id = msg.document.file_id
-        else:
-            continue
+    # heartbeat لكل العملية
+    heartbeat_running = True
+    async def heartbeat():
+        while heartbeat_running:
+            await asyncio.sleep(25)
+            try:
+                await context.bot.send_chat_action(chat_id=first_message.chat_id, action="typing")
+            except:
+                pass
+    heartbeat_task = asyncio.create_task(heartbeat())
+    
+    try:
+        success_count = 0
+        for i, msg in enumerate(messages, 1):
+            prefix = f"[{i}/{total}] "
+            
+            if msg.photo:
+                file_id = msg.photo[-1].file_id
+            elif msg.document:
+                file_id = msg.document.file_id
+            else:
+                continue
+            
+            await first_message.reply_text(f"{prefix}⏳ بدأت المعالجة...")
+            
+            try:
+                file = await context.bot.get_file(file_id)
+                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+                    await file.download_to_drive(tmp.name)
+                    image_path = tmp.name
+                
+                success = await process_one(first_message, context, image_path, keyword, prefix)
+                if success:
+                    success_count += 1
+                
+                try:
+                    os.unlink(image_path)
+                except:
+                    pass
+            except Exception as e:
+                logger.error(f"Image {i}: {e}")
+                await first_message.reply_text(f"{prefix}❌ {str(e)}")
         
-        logger.info(f"Processing image {i}/{total}")
-        success = await process_single_image(first_message, context, file_id, keyword, i, total)
-        if success:
-            success_count += 1
-    
-    await first_message.reply_text(
-        f"🎉 انتهيت!\n"
-        f"✅ نجح: {success_count}/{total}\n"
-        f"❌ فشل: {total - success_count}/{total}"
-    )
+        await first_message.reply_text(
+            f"🎉 انتهيت!\n"
+            f"✅ نجح: {success_count}/{total}\n"
+            f"❌ فشل: {total - success_count}/{total}"
+        )
+    finally:
+        heartbeat_running = False
+        try:
+            heartbeat_task.cancel()
+        except:
+            pass
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -659,7 +671,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("أرسل صورة مع caption")
         return
     
-    # لو الصورة جزء من ألبوم (media group)
+    # ألبوم
     if message.media_group_id:
         group_id = message.media_group_id
         
@@ -673,29 +685,58 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             MEDIA_GROUPS[group_id]["messages"].append(message)
             
-            # لو الـ caption موجود (عادة في أول صورة)، نحفظه
             if message.caption and not MEDIA_GROUPS[group_id]["keyword"]:
                 MEDIA_GROUPS[group_id]["keyword"] = message.caption
             
-            # نبدأ معالجة الألبوم مرة وحدة فقط
             if not MEDIA_GROUPS[group_id]["task_started"]:
                 MEDIA_GROUPS[group_id]["task_started"] = True
                 asyncio.create_task(process_media_group(context, group_id))
-        
         return
     
-    # صورة واحدة عادية
+    # صورة واحدة
     keyword = message.caption or ""
     if not keyword:
         await message.reply_text("⚠️ اكتب الكلمة المفتاحية")
         return
     
-    if message.photo:
-        file_id = message.photo[-1].file_id
-    else:
-        file_id = message.document.file_id
+    await message.reply_text("⏳ جاري المعالجة... (5-7 دقائق ☕)")
     
-    await process_single_image(message, context, file_id, keyword)
+    # heartbeat
+    heartbeat_running = True
+    async def heartbeat():
+        while heartbeat_running:
+            await asyncio.sleep(25)
+            try:
+                await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
+            except:
+                pass
+    heartbeat_task = asyncio.create_task(heartbeat())
+    
+    try:
+        if message.photo:
+            file = await context.bot.get_file(message.photo[-1].file_id)
+        else:
+            file = await context.bot.get_file(message.document.file_id)
+        
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            await file.download_to_drive(tmp.name)
+            image_path = tmp.name
+        
+        await process_one(message, context, image_path, keyword)
+        
+        try:
+            os.unlink(image_path)
+        except:
+            pass
+    except Exception as e:
+        logger.error(f"{e}")
+        await message.reply_text(f"❌ {str(e)}")
+    finally:
+        heartbeat_running = False
+        try:
+            heartbeat_task.cancel()
+        except:
+            pass
 
 
 # ========== Health Check Server ==========
