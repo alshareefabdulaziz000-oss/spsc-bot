@@ -274,17 +274,82 @@ async def fill_all_simple_fields(page, data):
     await select_option_by_label(page, "ContentPlaceHolder1_Gender_Drop", data['gender'], "Gender")
     await select_option_by_label(page, "ContentPlaceHolder1_WhereItHappen_Drop", "ER Adult", "Where")
     
+    # Diagnosis - autocomplete محسّن
     try:
         await page.click("#ContentPlaceHolder1_txtDiagnosis")
         await asyncio.sleep(0.5)
         term = data['diagnosis'][:5] if len(data['diagnosis']) >= 3 else "headache"
         await page.fill("#ContentPlaceHolder1_txtDiagnosis", "")
-        await page.type("#ContentPlaceHolder1_txtDiagnosis", term, delay=100)
-        await asyncio.sleep(3)
-        await page.keyboard.press("ArrowDown")
-        await asyncio.sleep(0.5)
-        await page.keyboard.press("Enter")
+        await asyncio.sleep(0.3)
+        
+        # نكتب حرف حرف مع تأخير
+        for char in term:
+            await page.keyboard.type(char, delay=150)
+        
+        # ننتظر القائمة تظهر
+        await asyncio.sleep(4)
+        
+        # نحاول النقر على الخيار الأول بعدة طرق
+        diagnosis_clicked = await page.evaluate("""
+            () => {
+                // الطريقة 1: jQuery UI autocomplete
+                const uiMenu = document.querySelector('.ui-autocomplete:not([style*="display: none"]), .ui-menu:not([style*="display: none"])');
+                if (uiMenu) {
+                    const firstItem = uiMenu.querySelector('li a, li.ui-menu-item, .ui-menu-item-wrapper');
+                    if (firstItem) {
+                        firstItem.click();
+                        return 'clicked: ui-autocomplete';
+                    }
+                }
+                
+                // الطريقة 2: أي dropdown ظاهر قرب input
+                const input = document.getElementById('ContentPlaceHolder1_txtDiagnosis');
+                if (input) {
+                    const allLists = document.querySelectorAll('ul');
+                    for (const ul of allLists) {
+                        if (ul.offsetParent !== null && ul.children.length > 0) {
+                            const rect = ul.getBoundingClientRect();
+                            const inputRect = input.getBoundingClientRect();
+                            if (Math.abs(rect.top - inputRect.bottom) < 200) {
+                                const firstLi = ul.querySelector('li');
+                                if (firstLi) {
+                                    firstLi.click();
+                                    return 'clicked: nearby list';
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // الطريقة 3: أي عنصر autocomplete
+                const items = document.querySelectorAll('.autocomplete-item, [class*="autocomplete"] li, [role="option"]');
+                for (const item of items) {
+                    if (item.offsetParent !== null) {
+                        item.click();
+                        return 'clicked: autocomplete item';
+                    }
+                }
+                
+                return 'not found';
+            }
+        """)
+        
+        logger.info(f"Diagnosis dropdown: {diagnosis_clicked}")
         await asyncio.sleep(1)
+        
+        # fallback: ArrowDown + Enter
+        val = await page.evaluate("() => document.getElementById('ContentPlaceHolder1_txtDiagnosis')?.value")
+        if not val or len(val) < 3:
+            logger.info("Trying ArrowDown+Enter fallback...")
+            await page.focus("#ContentPlaceHolder1_txtDiagnosis")
+            await asyncio.sleep(0.5)
+            await page.keyboard.press("ArrowDown")
+            await asyncio.sleep(0.5)
+            await page.keyboard.press("Enter")
+            await asyncio.sleep(1)
+        
+        final_val = await page.evaluate("() => document.getElementById('ContentPlaceHolder1_txtDiagnosis')?.value")
+        logger.info(f"✅ Diagnosis final: '{final_val}'")
     except Exception as e:
         logger.error(f"Diagnosis: {e}")
     
@@ -300,7 +365,7 @@ async def fill_all_simple_fields(page, data):
 async def fill_form(data: dict) -> dict:
     result = {"success": False, "error": "", "field_status": {}, "all_filled": False,
               "before_submit": "", "after_submit": "", "after_yes": "",
-              "submit_clicked": False, "yes_success": False, "modal_info": "", "final_url": ""}
+              "submit_clicked": False, "yes_success": False, "final_url": ""}
     
     try:
         subprocess.run(["playwright", "install", "chromium"], check=True, capture_output=True)
@@ -431,7 +496,7 @@ async def fill_form(data: dict) -> dict:
             result["all_filled"] = all_ok
             
             if all_ok:
-                logger.info("🚀 Starting Submit sequence...")
+                logger.info("🚀 Starting Submit...")
                 await page.evaluate("""
                     () => {
                         const btn = document.getElementById('ContentPlaceHolder1_Submit_Btn');
@@ -506,17 +571,12 @@ async def fill_form(data: dict) -> dict:
         except Exception as e:
             logger.error(f"💥 {e}")
             result["error"] = str(e)
-            try:
-                await page.screenshot(path="/tmp/form_error.png", full_page=True)
-                result["before_submit"] = "/tmp/form_error.png"
-            except: pass
             try: await browser.close()
             except: pass
             return result
 
 
 async def process_one(message, context, image_path, keyword, prefix=""):
-    """يعالج صورة واحدة — نفس المنطق القديم اللي كان شغال"""
     try:
         extracted = extract_from_image(image_path, keyword)
         if not extracted["mrn"] or not extracted["date"]:
@@ -545,19 +605,16 @@ async def process_one(message, context, image_path, keyword, prefix=""):
                 report += "\n⚠️ بعض الحقول فاضية"
             await message.reply_text(report)
         
-        # screenshot واحد فقط (الأهم)
         if result.get("after_yes") and os.path.exists(result["after_yes"]):
             try:
                 with open(result["after_yes"], "rb") as f:
                     await message.reply_photo(photo=f, caption=f"{prefix}📸 النتيجة")
-            except:
-                pass
+            except: pass
         elif result.get("before_submit") and os.path.exists(result["before_submit"]):
             try:
                 with open(result["before_submit"], "rb") as f:
                     await message.reply_photo(photo=f, caption=f"{prefix}📸")
-            except:
-                pass
+            except: pass
         
         diag = f"{prefix}🔍 Submit: {'✅' if result.get('submit_clicked') else '❌'} | Yes: {'✅' if result.get('yes_success') else '❌'}"
         await message.reply_text(diag)
@@ -581,7 +638,6 @@ async def process_one(message, context, image_path, keyword, prefix=""):
 
 
 async def process_media_group(context, group_id):
-    """يعالج ألبوم صور واحد تلو الآخر"""
     await asyncio.sleep(3)
     
     async with MEDIA_GROUPS_LOCK:
@@ -605,19 +661,17 @@ async def process_media_group(context, group_id):
     
     await first_message.reply_text(
         f"📸 استلمت {total} صور\n"
-        f"🔑 الكلمة: {keyword}\n"
+        f"🔑 {keyword}\n"
         f"⏳ سأعالجها واحدة واحدة"
     )
     
-    # heartbeat لكل العملية
     heartbeat_running = True
     async def heartbeat():
         while heartbeat_running:
             await asyncio.sleep(25)
             try:
                 await context.bot.send_chat_action(chat_id=first_message.chat_id, action="typing")
-            except:
-                pass
+            except: pass
     heartbeat_task = asyncio.create_task(heartbeat())
     
     try:
@@ -646,8 +700,7 @@ async def process_media_group(context, group_id):
                 
                 try:
                     os.unlink(image_path)
-                except:
-                    pass
+                except: pass
             except Exception as e:
                 logger.error(f"Image {i}: {e}")
                 await first_message.reply_text(f"{prefix}❌ {str(e)}")
@@ -659,10 +712,8 @@ async def process_media_group(context, group_id):
         )
     finally:
         heartbeat_running = False
-        try:
-            heartbeat_task.cancel()
-        except:
-            pass
+        try: heartbeat_task.cancel()
+        except: pass
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -671,7 +722,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("أرسل صورة مع caption")
         return
     
-    # ألبوم
     if message.media_group_id:
         group_id = message.media_group_id
         
@@ -682,18 +732,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "keyword": message.caption or "",
                     "task_started": False
                 }
-            
             MEDIA_GROUPS[group_id]["messages"].append(message)
-            
             if message.caption and not MEDIA_GROUPS[group_id]["keyword"]:
                 MEDIA_GROUPS[group_id]["keyword"] = message.caption
-            
             if not MEDIA_GROUPS[group_id]["task_started"]:
                 MEDIA_GROUPS[group_id]["task_started"] = True
                 asyncio.create_task(process_media_group(context, group_id))
         return
     
-    # صورة واحدة
     keyword = message.caption or ""
     if not keyword:
         await message.reply_text("⚠️ اكتب الكلمة المفتاحية")
@@ -701,15 +747,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await message.reply_text("⏳ جاري المعالجة... (5-7 دقائق ☕)")
     
-    # heartbeat
     heartbeat_running = True
     async def heartbeat():
         while heartbeat_running:
             await asyncio.sleep(25)
             try:
                 await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
-            except:
-                pass
+            except: pass
     heartbeat_task = asyncio.create_task(heartbeat())
     
     try:
@@ -726,27 +770,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         try:
             os.unlink(image_path)
-        except:
-            pass
+        except: pass
     except Exception as e:
         logger.error(f"{e}")
         await message.reply_text(f"❌ {str(e)}")
     finally:
         heartbeat_running = False
-        try:
-            heartbeat_task.cancel()
-        except:
-            pass
+        try: heartbeat_task.cancel()
+        except: pass
 
 
-# ========== Health Check Server ==========
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
         self.wfile.write(b"Bot is running")
-    
     def log_message(self, format, *args):
         pass
 
