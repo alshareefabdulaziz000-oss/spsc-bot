@@ -260,7 +260,6 @@ async def fill_all_simple_fields(page, data):
     await fill_text_by_name(page, "other", "ER", "Other ER")
     await asyncio.sleep(0.3)
     
-    # التاريخ والوقت
     date_parts = data['date'].split('/')
     time_str = data.get('time', '10:00')
     try:
@@ -325,7 +324,6 @@ async def fill_all_simple_fields(page, data):
     try:
         await page.click("#ContentPlaceHolder1_txtDiagnosis")
         await asyncio.sleep(0.5)
-        # نكتب التشخيص كامل لضمان الدقة
         term = data['diagnosis'] if data['diagnosis'] else "headache"
         await page.fill("#ContentPlaceHolder1_txtDiagnosis", "")
         await asyncio.sleep(0.3)
@@ -394,7 +392,7 @@ async def fill_all_simple_fields(page, data):
 async def fill_form(data: dict) -> dict:
     result = {"success": False, "error": "", "field_status": {}, "all_filled": False,
               "before_submit": "", "after_submit": "", "after_yes": "",
-              "submit_clicked": False, "yes_success": False, "final_url": ""}
+              "submit_clicked": False, "yes_success": False, "final_url": "", "factor_added": False}
     
     try:
         subprocess.run(["playwright", "install", "chromium"], check=True, capture_output=True)
@@ -458,6 +456,7 @@ async def fill_form(data: dict) -> dict:
             await asyncio.sleep(2)
             
             logger.info("========== Factor + Add ==========")
+            factor_added = False
             try:
                 await asyncio.sleep(2)
                 factor_value = await page.evaluate("""
@@ -470,15 +469,106 @@ async def fill_form(data: dict) -> dict:
                         return null;
                     }
                 """)
+                
                 if factor_value:
                     await page.select_option("#ContentPlaceHolder1_Factors_Drop", value=factor_value)
                     await asyncio.sleep(1)
-                    await page.click("#ContentPlaceHolder1_Factors_Main_Btn", timeout=10000, force=True)
+                    await page.evaluate("""
+                        () => {
+                            const sel = document.getElementById('ContentPlaceHolder1_Factors_Drop');
+                            if (sel) sel.dispatchEvent(new Event('change', { bubbles: true }));
+                        }
+                    """)
+                    await asyncio.sleep(1)
+                    
+                    selected = await page.evaluate("() => document.getElementById('ContentPlaceHolder1_Factors_Drop')?.value")
+                    logger.info(f"Factor selected value: {selected}")
+                    
+                    add_clicked = False
+                    
+                    try:
+                        await page.click("#ContentPlaceHolder1_Factors_Main_Btn", timeout=8000)
+                        add_clicked = True
+                        logger.info("✅ Factor Add: Playwright click")
+                    except Exception as e:
+                        logger.warning(f"Factor Add method 1: {e}")
+                    
+                    if not add_clicked:
+                        try:
+                            await page.click("#ContentPlaceHolder1_Factors_Main_Btn", timeout=8000, force=True)
+                            add_clicked = True
+                            logger.info("✅ Factor Add: force click")
+                        except Exception as e:
+                            logger.warning(f"Factor Add method 2: {e}")
+                    
+                    if not add_clicked:
+                        try:
+                            js_result = await page.evaluate("""
+                                () => {
+                                    const btn = document.getElementById('ContentPlaceHolder1_Factors_Main_Btn');
+                                    if (btn) { btn.click(); return 'js click done'; }
+                                    return 'btn not found';
+                                }
+                            """)
+                            logger.info(f"Factor Add JS: {js_result}")
+                            add_clicked = True
+                        except Exception as e:
+                            logger.warning(f"Factor Add method 3: {e}")
+                    
                     await safe_wait_after_postback(page, 6)
+                    
+                    factor_in_table = await page.evaluate("""
+                        () => {
+                            const tables = document.querySelectorAll('table, tr, td');
+                            for (const t of tables) {
+                                if (t.innerText && t.innerText.toLowerCase().includes('lack of knowledge')) {
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }
+                    """)
+                    
+                    if factor_in_table:
+                        factor_added = True
+                        logger.info("✅✅ Factor CONFIRMED in table")
+                    else:
+                        logger.warning("⚠️ Factor not in table — retrying...")
+                        await page.select_option("#ContentPlaceHolder1_Factors_Drop", value=factor_value)
+                        await asyncio.sleep(1)
+                        try:
+                            await page.click("#ContentPlaceHolder1_Factors_Main_Btn", timeout=8000, force=True)
+                        except:
+                            await page.evaluate("""
+                                () => {
+                                    const btn = document.getElementById('ContentPlaceHolder1_Factors_Main_Btn');
+                                    if (btn) btn.click();
+                                }
+                            """)
+                        await safe_wait_after_postback(page, 6)
+                        
+                        factor_in_table2 = await page.evaluate("""
+                            () => {
+                                const tables = document.querySelectorAll('table, tr, td');
+                                for (const t of tables) {
+                                    if (t.innerText && t.innerText.toLowerCase().includes('lack of knowledge')) {
+                                        return true;
+                                    }
+                                }
+                                return false;
+                            }
+                        """)
+                        if factor_in_table2:
+                            factor_added = True
+                            logger.info("✅✅ Factor CONFIRMED on retry")
+                        else:
+                            logger.error("❌ Factor STILL not in table")
                 else:
-                    logger.error("Factor value not found!")
+                    logger.error("❌ Factor value not found in dropdown!")
             except Exception as e:
                 logger.error(f"Factor: {e}")
+            
+            result["factor_added"] = factor_added
             
             logger.info("========== ROUND 4 FINAL ==========")
             await fill_all_simple_fields(page, data)
@@ -504,6 +594,19 @@ async def fill_form(data: dict) -> dict:
             """)
             logger.info(f"🔍 FINAL: {final_check}")
             
+            # فحص factor في الجدول
+            factor_check = await page.evaluate("""
+                () => {
+                    const tables = document.querySelectorAll('table, tr, td');
+                    for (const t of tables) {
+                        if (t.innerText && t.innerText.toLowerCase().includes('lack of knowledge')) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            """)
+            
             status = {
                 "mrn": bool(str(final_check.get('mrn', '')).strip()),
                 "date": bool(str(final_check.get('date', '')).strip()),
@@ -519,11 +622,12 @@ async def fill_form(data: dict) -> dict:
                 "staff": bool(str(final_check.get('staff', '')).strip() and str(final_check.get('staff', '')) != ''),
                 "reach_no": final_check.get('reach_no', False),
                 "prescription": final_check.get('wasfaty_other', False),
+                "factor": factor_check,
             }
             result["field_status"] = status
             
             critical = ["reach_no", "date", "prescription", "stage", "description", "diagnosis", "action",
-                       "mrn", "gender", "where", "reporter", "email", "mobile", "staff"]
+                       "mrn", "gender", "where", "reporter", "email", "mobile", "staff", "factor"]
             all_ok = all(status.get(f, False) for f in critical)
             result["all_filled"] = all_ok
             
@@ -648,7 +752,7 @@ async def process_one(message, context, image_path, keyword, prefix=""):
                     await message.reply_photo(photo=f, caption=f"{prefix}📸")
             except: pass
         
-        diag = f"{prefix}🔍 Submit: {'✅' if result.get('submit_clicked') else '❌'} | Yes: {'✅' if result.get('yes_success') else '❌'}"
+        diag = f"{prefix}🔍 Submit: {'✅' if result.get('submit_clicked') else '❌'} | Yes: {'✅' if result.get('yes_success') else '❌'} | Factor: {'✅' if result.get('factor_added') else '❌'}"
         await message.reply_text(diag)
         
         if result["success"] and result.get("all_filled") and result.get("yes_success"):
