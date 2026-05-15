@@ -320,7 +320,6 @@ async def fill_all_simple_fields(page, data):
     await select_option_by_label(page, "ContentPlaceHolder1_Gender_Drop", data['gender'], "Gender")
     await select_option_by_label(page, "ContentPlaceHolder1_WhereItHappen_Drop", "ER Adult", "Where")
     
-    # Diagnosis - نكتب الاسم كامل
     try:
         await page.click("#ContentPlaceHolder1_txtDiagnosis")
         await asyncio.sleep(0.5)
@@ -389,10 +388,176 @@ async def fill_all_simple_fields(page, data):
     await select_option_by_label(page, "ContentPlaceHolder1_Staff_Cat_Drop", "Pharmacist", "Staff")
 
 
+async def add_factor_robust(page):
+    """يضيف Factor بطريقة قوية مع تشخيص كامل"""
+    diag_info = {}
+    
+    await asyncio.sleep(3)
+    
+    # تشخيص كامل
+    diag_info = await page.evaluate("""
+        () => {
+            const info = {
+                dropdown_exists: false,
+                dropdown_options: [],
+                button_exists: false,
+                button_info: null,
+                all_factor_buttons: []
+            };
+            const sel = document.getElementById('ContentPlaceHolder1_Factors_Drop');
+            if (sel) {
+                info.dropdown_exists = true;
+                for (let i = 0; i < sel.options.length; i++) {
+                    info.dropdown_options.push(sel.options[i].text);
+                }
+            }
+            const btn = document.getElementById('ContentPlaceHolder1_Factors_Main_Btn');
+            if (btn) {
+                info.button_exists = true;
+                info.button_info = {
+                    tag: btn.tagName,
+                    type: btn.type,
+                    value: btn.value,
+                    visible: btn.offsetParent !== null,
+                    disabled: btn.disabled,
+                    onclick: btn.getAttribute('onclick')
+                };
+            }
+            document.querySelectorAll('input[type="button"], input[type="submit"], button').forEach(b => {
+                const id = (b.id || '').toLowerCase();
+                if (id.includes('factor')) {
+                    info.all_factor_buttons.push({
+                        id: b.id,
+                        value: b.value || b.innerText,
+                        visible: b.offsetParent !== null,
+                        disabled: b.disabled
+                    });
+                }
+            });
+            return info;
+        }
+    """)
+    logger.info(f"🔍 FACTOR DIAGNOSTIC: {diag_info}")
+    
+    # نجد قيمة الـ factor
+    factor_value = await page.evaluate("""
+        () => {
+            const sel = document.getElementById('ContentPlaceHolder1_Factors_Drop');
+            if (!sel) return null;
+            for (let i = 0; i < sel.options.length; i++) {
+                if (sel.options[i].text.toLowerCase().includes('lack of knowledge')) return sel.options[i].value;
+            }
+            return null;
+        }
+    """)
+    
+    if not factor_value:
+        logger.error("❌ Factor value not found in dropdown!")
+        return False, diag_info
+    
+    # نختار الـ factor
+    await page.select_option("#ContentPlaceHolder1_Factors_Drop", value=factor_value)
+    await asyncio.sleep(1)
+    await page.evaluate("""
+        () => {
+            const sel = document.getElementById('ContentPlaceHolder1_Factors_Drop');
+            if (sel) sel.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+    """)
+    await asyncio.sleep(1.5)
+    
+    # نحاول نضغط Add بكل الطرق الممكنة، مع التحقق بعد كل محاولة
+    for attempt in range(4):
+        logger.info(f"Factor Add attempt {attempt+1}/4")
+        
+        # نتأكد الـ factor لسه مختار
+        await page.select_option("#ContentPlaceHolder1_Factors_Drop", value=factor_value)
+        await asyncio.sleep(0.5)
+        
+        if attempt == 0:
+            # طريقة 1: __doPostBack مباشر (الأقوى لـ ASP.NET)
+            try:
+                await page.evaluate("""
+                    () => {
+                        const btn = document.getElementById('ContentPlaceHolder1_Factors_Main_Btn');
+                        if (btn && btn.getAttribute('onclick')) {
+                            eval(btn.getAttribute('onclick'));
+                        } else if (typeof __doPostBack === 'function') {
+                            __doPostBack('ctl00$ContentPlaceHolder1$Factors_Main_Btn', '');
+                        } else if (btn) {
+                            btn.click();
+                        }
+                    }
+                """)
+                logger.info("Factor: tried __doPostBack/onclick")
+            except Exception as e:
+                logger.warning(f"Method 1: {e}")
+        elif attempt == 1:
+            # طريقة 2: Playwright force click
+            try:
+                await page.click("#ContentPlaceHolder1_Factors_Main_Btn", timeout=8000, force=True)
+                logger.info("Factor: tried force click")
+            except Exception as e:
+                logger.warning(f"Method 2: {e}")
+        elif attempt == 2:
+            # طريقة 3: scroll + click عادي
+            try:
+                await page.evaluate("""
+                    () => {
+                        const btn = document.getElementById('ContentPlaceHolder1_Factors_Main_Btn');
+                        if (btn) btn.scrollIntoView({block: 'center'});
+                    }
+                """)
+                await asyncio.sleep(1)
+                await page.click("#ContentPlaceHolder1_Factors_Main_Btn", timeout=8000)
+                logger.info("Factor: tried scroll+click")
+            except Exception as e:
+                logger.warning(f"Method 3: {e}")
+        else:
+            # طريقة 4: JS click مباشر
+            try:
+                await page.evaluate("""
+                    () => {
+                        const btn = document.getElementById('ContentPlaceHolder1_Factors_Main_Btn');
+                        if (btn) btn.click();
+                    }
+                """)
+                logger.info("Factor: tried direct JS click")
+            except Exception as e:
+                logger.warning(f"Method 4: {e}")
+        
+        # ننتظر postback
+        await safe_wait_after_postback(page, 6)
+        
+        # نتحقق هل انضاف في الجدول
+        in_table = await page.evaluate("""
+            () => {
+                const tables = document.querySelectorAll('table, tr, td');
+                for (const t of tables) {
+                    if (t.innerText && t.innerText.toLowerCase().includes('lack of knowledge')) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+        """)
+        
+        if in_table:
+            logger.info(f"✅✅ Factor CONFIRMED in table (attempt {attempt+1})")
+            return True, diag_info
+        
+        logger.warning(f"⚠️ Factor not in table after attempt {attempt+1}")
+        await asyncio.sleep(2)
+    
+    logger.error("❌ Factor FAILED after all 4 attempts")
+    return False, diag_info
+
+
 async def fill_form(data: dict) -> dict:
     result = {"success": False, "error": "", "field_status": {}, "all_filled": False,
               "before_submit": "", "after_submit": "", "after_yes": "",
-              "submit_clicked": False, "yes_success": False, "final_url": "", "factor_added": False}
+              "submit_clicked": False, "yes_success": False, "final_url": "", "factor_added": False,
+              "factor_before": "", "factor_after": "", "factor_diag": ""}
     
     try:
         subprocess.run(["playwright", "install", "chromium"], check=True, capture_output=True)
@@ -455,120 +620,23 @@ async def fill_form(data: dict) -> dict:
             await fill_all_simple_fields(page, data)
             await asyncio.sleep(2)
             
-            logger.info("========== Factor + Add ==========")
-            factor_added = False
+            # ===== Factor باستخدام الدالة القوية =====
+            logger.info("========== Factor + Add (ROBUST) ==========")
             try:
-                await asyncio.sleep(2)
-                factor_value = await page.evaluate("""
-                    () => {
-                        const sel = document.getElementById('ContentPlaceHolder1_Factors_Drop');
-                        if (!sel) return null;
-                        for (let i = 0; i < sel.options.length; i++) {
-                            if (sel.options[i].text.toLowerCase().includes('lack of knowledge')) return sel.options[i].value;
-                        }
-                        return null;
-                    }
-                """)
-                
-                if factor_value:
-                    await page.select_option("#ContentPlaceHolder1_Factors_Drop", value=factor_value)
-                    await asyncio.sleep(1)
-                    await page.evaluate("""
-                        () => {
-                            const sel = document.getElementById('ContentPlaceHolder1_Factors_Drop');
-                            if (sel) sel.dispatchEvent(new Event('change', { bubbles: true }));
-                        }
-                    """)
-                    await asyncio.sleep(1)
-                    
-                    selected = await page.evaluate("() => document.getElementById('ContentPlaceHolder1_Factors_Drop')?.value")
-                    logger.info(f"Factor selected value: {selected}")
-                    
-                    add_clicked = False
-                    
-                    try:
-                        await page.click("#ContentPlaceHolder1_Factors_Main_Btn", timeout=8000)
-                        add_clicked = True
-                        logger.info("✅ Factor Add: Playwright click")
-                    except Exception as e:
-                        logger.warning(f"Factor Add method 1: {e}")
-                    
-                    if not add_clicked:
-                        try:
-                            await page.click("#ContentPlaceHolder1_Factors_Main_Btn", timeout=8000, force=True)
-                            add_clicked = True
-                            logger.info("✅ Factor Add: force click")
-                        except Exception as e:
-                            logger.warning(f"Factor Add method 2: {e}")
-                    
-                    if not add_clicked:
-                        try:
-                            js_result = await page.evaluate("""
-                                () => {
-                                    const btn = document.getElementById('ContentPlaceHolder1_Factors_Main_Btn');
-                                    if (btn) { btn.click(); return 'js click done'; }
-                                    return 'btn not found';
-                                }
-                            """)
-                            logger.info(f"Factor Add JS: {js_result}")
-                            add_clicked = True
-                        except Exception as e:
-                            logger.warning(f"Factor Add method 3: {e}")
-                    
-                    await safe_wait_after_postback(page, 6)
-                    
-                    factor_in_table = await page.evaluate("""
-                        () => {
-                            const tables = document.querySelectorAll('table, tr, td');
-                            for (const t of tables) {
-                                if (t.innerText && t.innerText.toLowerCase().includes('lack of knowledge')) {
-                                    return true;
-                                }
-                            }
-                            return false;
-                        }
-                    """)
-                    
-                    if factor_in_table:
-                        factor_added = True
-                        logger.info("✅✅ Factor CONFIRMED in table")
-                    else:
-                        logger.warning("⚠️ Factor not in table — retrying...")
-                        await page.select_option("#ContentPlaceHolder1_Factors_Drop", value=factor_value)
-                        await asyncio.sleep(1)
-                        try:
-                            await page.click("#ContentPlaceHolder1_Factors_Main_Btn", timeout=8000, force=True)
-                        except:
-                            await page.evaluate("""
-                                () => {
-                                    const btn = document.getElementById('ContentPlaceHolder1_Factors_Main_Btn');
-                                    if (btn) btn.click();
-                                }
-                            """)
-                        await safe_wait_after_postback(page, 6)
-                        
-                        factor_in_table2 = await page.evaluate("""
-                            () => {
-                                const tables = document.querySelectorAll('table, tr, td');
-                                for (const t of tables) {
-                                    if (t.innerText && t.innerText.toLowerCase().includes('lack of knowledge')) {
-                                        return true;
-                                    }
-                                }
-                                return false;
-                            }
-                        """)
-                        if factor_in_table2:
-                            factor_added = True
-                            logger.info("✅✅ Factor CONFIRMED on retry")
-                        else:
-                            logger.error("❌ Factor STILL not in table")
-                else:
-                    logger.error("❌ Factor value not found in dropdown!")
-            except Exception as e:
-                logger.error(f"Factor: {e}")
+                await page.screenshot(path="/tmp/factor_before.png", full_page=False)
+                if os.path.exists("/tmp/factor_before.png"):
+                    result["factor_before"] = "/tmp/factor_before.png"
+            except: pass
             
+            factor_added, factor_diag = await add_factor_robust(page)
             result["factor_added"] = factor_added
+            result["factor_diag"] = str(factor_diag)
+            
+            try:
+                await page.screenshot(path="/tmp/factor_after.png", full_page=False)
+                if os.path.exists("/tmp/factor_after.png"):
+                    result["factor_after"] = "/tmp/factor_after.png"
+            except: pass
             
             logger.info("========== ROUND 4 FINAL ==========")
             await fill_all_simple_fields(page, data)
@@ -594,7 +662,6 @@ async def fill_form(data: dict) -> dict:
             """)
             logger.info(f"🔍 FINAL: {final_check}")
             
-            # فحص factor في الجدول
             factor_check = await page.evaluate("""
                 () => {
                     const tables = document.querySelectorAll('table, tr, td');
@@ -740,6 +807,23 @@ async def process_one(message, context, image_path, keyword, prefix=""):
             else:
                 report += "\n⚠️ بعض الحقول فاضية"
             await message.reply_text(report)
+        
+        # Screenshots تشخيصية لـ Factor
+        if result.get("factor_before") and os.path.exists(result["factor_before"]):
+            try:
+                with open(result["factor_before"], "rb") as f:
+                    await message.reply_photo(photo=f, caption=f"{prefix}🔍 Factor قبل")
+            except: pass
+        if result.get("factor_after") and os.path.exists(result["factor_after"]):
+            try:
+                with open(result["factor_after"], "rb") as f:
+                    await message.reply_photo(photo=f, caption=f"{prefix}🔍 Factor بعد")
+            except: pass
+        if result.get("factor_diag"):
+            fd = result["factor_diag"]
+            if len(fd) > 600:
+                fd = fd[:600] + "..."
+            await message.reply_text(f"{prefix}🔍 Factor info:\n{fd}")
         
         if result.get("after_yes") and os.path.exists(result["after_yes"]):
             try:
